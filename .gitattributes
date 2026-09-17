@@ -1,0 +1,9 @@
+# 统一用 LF 存进仓库。Windows 上 checkout 成 CRLF 也行，
+# 但代码里没有依赖行尾的东西，统一 LF 能让 diff 干净。
+* text=auto eol=lf
+
+# 这些是二进制，别碰
+*.png binary
+*.jpg binary
+*.pdf binary
+*.docx binary

@@ -1,0 +1,20 @@
+{
+  "name": "boss-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Boss 直聘投递流水线工作台 —— DSH Web 客户端插件 + 纯 HTTP 抓取层",
+  "license": "MIT",
+  "scripts": {
+    "test": "node smoke.mjs",
+    "test:parse": "node boss/parse.test.mjs",
+    "test:bridge": "node boss/bridge.test.mjs",
+    "test:connectivity": "node boss/connectivity.test.mjs",
+    "login": "node boss/login-now.mjs",
+    "repair": "node boss/repair-session.mjs",
+    "whoami": "node boss/probe-loginstate.mjs",
+    "scrape": "node boss/scrape.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.2"
+  }
+}

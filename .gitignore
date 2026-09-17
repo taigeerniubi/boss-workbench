@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  运行期数据**已经不在这个目录里了** —— 从 v0.1 起它们落在
+#
+#      ~/.dsh/boss-workbench/      （和 ~/.dsh/.credentials.yaml 里的 key 并排）
+#        data/  browser-profile/  resumes/  runs/
+#
+#  也就是说"数据不在仓库里"是靠**目录布局**保证的，不靠这份 .gitignore。
+#  下面这些条目留着纯粹是第二道防线：万一有人设了 BOSS_HOME 指回仓库目录，
+#  或者哪天顺手把文件拷回来，也别让它进 Git。
+#
+#  为什么这么紧张：下面任何一个进了 Git 历史就删不干净了（reflog / fork / 缓存都在）
+#    data/session.json   = Boss 登录凭证（wt2 / bst / zp_at / __zp_stoken__）
+#    browser-profile/    = 浏览器 persistent profile，里面是同一批活 cookie
+#    resumes/            = 简历原件
+#    data/resume-text/   = 简历解析全文（姓名 / 电话 / 经历）
+#    runs/               = Boss 原始响应，含 uid / 昵称 / 会话
+# ─────────────────────────────────────────────────────────────────────────────
+
+# —— 旧布局的残留（数据已经搬到 ~/.dsh 了，这里只是兜底）——
+/data/
+/resumes/
+/runs/
+/.boss-profile/
+/browser-profile/
+
+# —— 凭证（任何位置）——
+*.credentials.yaml
+.credentials.yaml
+
+# —— 本机一次性侦察脚本（里面写死了 D:\opencode、C:\Users\<你> 这类路径）——
+/probe-*.mjs
+/RECON-browser-automation.md
+
+# —— 截图：侧栏会露出我的会话标题，工作台会露出我的简历文件名 ——
+/preview/*.png
+/boss/preview/
+
+# —— 第三方参考仓库：mucsbr/mcp-bosszp，对方没有 LICENSE 文件，
+#    默认"保留所有权利"。为了让代码里能对照，本地留了一份；不随仓库分发。 ——
+/ref/
+
+# —— 常规 ——
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*

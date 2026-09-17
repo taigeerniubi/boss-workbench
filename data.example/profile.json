@@ -1,0 +1,8 @@
+{
+  "homeCity": "北京",
+  "homeAddress": "",
+  "homeGeo": null,
+  "keywords": ["你的岗位关键词"],
+  "maxKm": 10,
+  "note": "把这个文件复制成 ~/.dsh/boss-workbench/data/profile.json（先跑一次任何 boss/ 下的命令，目录会自动建好）。homeCity 用 北京/上海 之外的城市需要先登录以缓存城市表。homeGeo 填成 { \"lng\": 116.40, \"lat\": 39.90 } 之后，只要有岗位坐标就能算真实距离（Haversine）；留 null 时只能用 Boss 自己给的文本距离。homeAddress 只给你自己看，不参与计算。"
+}

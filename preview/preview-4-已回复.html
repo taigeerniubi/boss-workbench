@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>preview-4-已回复</title>
+<style>
+:root{
+--dsw-static-neutral-bluish-00:#fff;--dsw-static-neutral-bluish-50:#f9fafb;--dsw-static-neutral-bluish-60:#f5f6f7;
+--dsw-static-neutral-bluish-100:#ebeef2;--dsw-static-neutral-bluish-200:#e1e5ee;--dsw-static-neutral-bluish-300:#cfd3d6;
+--dsw-static-neutral-bluish-400:#adb2b8;--dsw-static-neutral-bluish-600:#81858c;--dsw-static-neutral-bluish-700:#61666b;
+--dsw-static-neutral-bluish-1000:#0f1115;
+--dsw-static-amber-100:#fef5e7;--dsw-static-amber-500:#f59e0b;--dsw-static-amber-600:#dd8629;
+--dsw-static-green-100:#e6faed;--dsw-static-green-500:#22c55e;--dsw-static-red-600:#ec1313;--dsw-static-deepseek-500:#4176e6;
+--dsw-alias-bg-base:var(--dsw-static-neutral-bluish-00);
+--dsw-alias-bg-layer-1:var(--dsw-static-neutral-bluish-00);
+--dsw-alias-bg-layer-2:var(--dsw-static-neutral-bluish-00);
+--dsw-alias-bg-layer-3:var(--dsw-static-neutral-bluish-00);
+--dsw-alias-bg-module-platform:var(--dsw-static-neutral-bluish-60);
+--dsw-alias-border-l1:#0000000a;--dsw-alias-border-l2:#0000001a;--dsw-alias-border-l3:#0000001f;--dsw-alias-border-l4:#00000029;
+--dsw-alias-label-primary:var(--dsw-static-neutral-bluish-1000);
+--dsw-alias-label-secondary:var(--dsw-static-neutral-bluish-700);
+--dsw-alias-label-tertiary:var(--dsw-static-neutral-bluish-600);
+--dsw-alias-label-caption:var(--dsw-static-neutral-bluish-400);
+--dsw-alias-interactive-bg-hover:#2631480f;--dsw-alias-interactive-bg-active:#2631481a;
+--dsw-alias-state-warn-primary:var(--dsw-static-amber-500);
+--dsw-alias-state-warn-tertiary:var(--dsw-static-amber-100);
+--dsw-alias-state-warn-label:var(--dsw-static-amber-600);
+--dsw-alias-state-success-primary:var(--dsw-static-green-500);
+--dsw-alias-state-success-tertiary:var(--dsw-static-green-100);
+--dsw-alias-state-error-primary:var(--dsw-static-red-600);
+--dsw-alias-state-business-primary:var(--dsw-static-deepseek-500);
+--dsw-alias-brand-primary:var(--dsw-static-neutral-bluish-1000);
+--dsw-elevation-prominent:0 0 0 1px var(--dsw-alias-border-l4), 0 3px 8px 0 #0000000a, 0 0 20px 0 #0000000d;
+--dsw-font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+}
+html,body{margin:0;background:#fff;font-family:var(--dsw-font-family);-webkit-font-smoothing:antialiased}
+#frame{width:1240px;height:640px;overflow:hidden}
+
+.bw_page{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw-alias-bg-module-platform,#f5f6f7);color:var(--dsw-alias-label-primary,#0f1115)}
+.bw_head{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--dsw-alias-bg-layer-1,#fff);border-bottom:1px solid var(--dsw-alias-border-l2);flex:none}
+.bw_title{font-size:14px;font-weight:600;letter-spacing:.01em}
+.bw_btn{height:28px;padding:0 11px;font:inherit;font-size:12.5px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px solid transparent;border-radius:8px;cursor:pointer;white-space:nowrap}
+.bw_btn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.bw_btnPrimary{color:#fff;background:var(--dsw-alias-brand-primary,#0f1115)}
+.bw_btnPrimary:hover{color:#fff;background:var(--dsw-alias-brand-primary,#0f1115);filter:brightness(1.3)}
+.bw_btnDanger{color:var(--dsw-alias-state-error-primary,#ec1313);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ec1313) 12%,transparent)}
+.bw_btnDanger:hover{color:var(--dsw-alias-state-error-primary,#ec1313);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ec1313) 22%,transparent)}
+/* 「去 Boss 拿数据」这一类主动作 —— 整个工作台里唯一会真的联网的按钮 */
+.bw_btnGo{color:#fff;background:var(--dsw-alias-state-business-primary,#4176e6)}
+.bw_btnGo:hover{color:#fff;background:var(--dsw-alias-state-business-primary,#4176e6);filter:brightness(1.12)}
+.bw_btnGo:disabled,.bw_btnBusy{opacity:.6;cursor:progress}
+.bw_btnGo:disabled:hover{filter:none}
+.bw_btnBusy{color:#fff;background:var(--dsw-alias-state-business-primary,#4176e6)}
+.bw_spacer{flex:1}
+
+/* 顶部三个计数 = 状态筛选段控件（点一下筛，再点一下取消） */
+.bw_tallies{display:inline-flex;align-items:center;gap:2px;padding:2px;background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px solid var(--dsw-alias-border-l2);border-radius:9px;flex:none}
+.bw_tally{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary);background:transparent;border:0;border-radius:7px;cursor:pointer;white-space:nowrap;font-variant-numeric:tabular-nums}
+.bw_tally:hover{color:var(--dsw-alias-label-primary)}
+.bw_tallyHot{color:var(--dsw-alias-state-warn-label,#dd8629)}
+.bw_tallyOn{color:var(--dsw-alias-label-primary);font-weight:600;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 1px 2px #00000014}
+.bw_tallyOn.bw_tallyHot{color:var(--dsw-alias-state-warn-label,#dd8629)}
+.bw_dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+
+/* 三栏 = 三张圆角面板，画在浅色画布上，靠底色 + 间距 + 描边三重分界 */
+.bw_cols{flex:1;display:grid;grid-template-columns:minmax(240px,264px) minmax(340px,1fr) minmax(266px,300px);gap:10px;padding:10px 12px 12px;min-height:0}
+.bw_col{display:flex;flex-direction:column;min-height:0;min-width:0;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;overflow:hidden}
+.bw_colMid{border-color:var(--dsw-alias-border-l3)}
+.bw_colHead{display:flex;align-items:center;gap:6px;padding:9px 12px;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dsw-alias-label-tertiary);border-bottom:1px solid var(--dsw-alias-border-l2);flex:none}
+.bw_scroll{flex:1;overflow-y:auto;min-height:0;position:relative}
+.bw_tag{display:inline-flex;align-items:center;gap:2px;height:17px;padding:0 4px 0 6px;font-size:10px;font-weight:600;letter-spacing:0;text-transform:none;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px solid var(--dsw-alias-border-l2);border-radius:5px}
+.bw_tagX{width:14px;height:14px;padding:0;font-size:11px;line-height:1;color:var(--dsw-alias-label-tertiary);background:transparent;border:0;border-radius:4px;cursor:pointer}
+.bw_tagX:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+
+.bw_group{padding:6px 8px 4px}
+.bw_group+.bw_group{border-top:1px solid var(--dsw-alias-border-l2)}
+.bw_groupHead{display:flex;align-items:center;gap:6px;padding:3px 4px 6px;font-size:11px;font-weight:600;color:var(--dsw-alias-label-tertiary)}
+.bw_groupHot{color:var(--dsw-alias-state-warn-label,#dd8629)}
+.bw_groupN{margin-left:auto;font-variant-numeric:tabular-nums}
+.bw_card{display:block;width:100%;text-align:left;box-sizing:border-box;padding:8px 10px;margin-bottom:4px;background:transparent;border:1px solid transparent;border-radius:9px;cursor:pointer;color:inherit;font:inherit;outline:none}
+.bw_card:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.bw_card:focus-visible{border-color:var(--dsw-alias-border-l4)}
+.bw_cardOn{background:var(--dsw-alias-bg-module-platform,#f5f6f7);border-color:var(--dsw-alias-border-l3)}
+.bw_cardTop{display:flex;align-items:baseline;gap:6px;min-width:0}
+.bw_co{font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.bw_sal{margin-left:auto;font-size:11px;color:var(--dsw-alias-label-tertiary);flex:none;font-variant-numeric:tabular-nums}
+.bw_role{font-size:12px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px}
+.bw_meta{display:flex;align-items:center;gap:6px;margin-top:5px;min-width:0}
+.bw_chip{display:inline-flex;align-items:center;gap:4px;height:17px;padding:0 6px;font:inherit;font-size:10.5px;border:0;border-radius:5px;background:var(--dsw-alias-bg-module-platform,#f5f6f7);color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bw_chipHot{background:var(--dsw-alias-state-warn-tertiary,#fef5e7);color:var(--dsw-alias-state-warn-label,#dd8629)}
+.bw_chipOk{background:var(--dsw-alias-state-success-tertiary,#e6faed);color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#22c55e) 68%,#0f1115)}
+.bw_chipBad{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ec1313) 12%,transparent);color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ec1313) 88%,#0f1115)}
+.bw_chipBrand{background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#4176e6) 12%,transparent);color:color-mix(in srgb,var(--dsw-alias-state-business-primary,#4176e6) 90%,#0f1115)}
+/* 状态标签可点：点它就是"按这个状态看 + 跳到这个状态该做的事" */
+.bw_chipBtn{cursor:pointer;box-shadow:inset 0 0 0 1px transparent}
+.bw_chipBtn:hover{box-shadow:inset 0 0 0 1px color-mix(in srgb,currentColor 50%,transparent)}
+
+.bw_detail{padding:14px 16px 18px}
+.bw_dTitle{font-size:16px;font-weight:650;letter-spacing:.01em}
+.bw_dSub{margin-top:3px;font-size:12.5px;color:var(--dsw-alias-label-tertiary)}
+.bw_sect{margin-top:16px}
+.bw_sectHead{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dsw-alias-label-tertiary)}
+.bw_jd{box-sizing:border-box;padding:11px 12px;font-size:12.5px;line-height:1.65;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px solid var(--dsw-alias-border-l1);border-radius:10px;max-height:230px;overflow-y:auto}
+.bw_pick{display:flex;align-items:center;gap:8px;box-sizing:border-box;padding:8px 10px;background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px solid var(--dsw-alias-border-l1);border-radius:10px}
+.bw_pickFile{display:flex;align-items:center;gap:7px;min-width:0;font-size:12.5px;font-family:var(--dsw-font-markdown-code-font-family,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace)}
+.bw_pickName{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bw_pickNote{font-size:11px;color:var(--dsw-alias-label-tertiary);margin-left:auto;flex:none}
+.bw_ta{box-sizing:border-box;width:100%;min-height:80px;padding:10px 11px;font:inherit;font-size:12.5px;line-height:1.6;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px solid var(--dsw-alias-border-l1);border-radius:10px;outline:none;resize:vertical}
+.bw_ta:focus{border-color:var(--dsw-alias-border-l4)}
+/* 这个状态要我做什么 —— 三种"需要我"的状态在这里各自说明并给出主行动 */
+.bw_note{display:flex;align-items:flex-start;gap:8px;box-sizing:border-box;padding:9px 11px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px solid var(--dsw-alias-border-l1);border-radius:10px}
+.bw_noteWarn{color:color-mix(in srgb,var(--dsw-alias-state-warn-label,#dd8629) 82%,#0f1115);background:var(--dsw-alias-state-warn-tertiary,#fef5e7);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 26%,transparent)}
+.bw_noteOk{color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#22c55e) 66%,#0f1115);background:var(--dsw-alias-state-success-tertiary,#e6faed);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#22c55e) 26%,transparent)}
+.bw_noteBad{color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ec1313) 84%,#0f1115);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ec1313) 10%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ec1313) 24%,transparent)}
+.bw_noteBusy{color:color-mix(in srgb,var(--dsw-alias-state-business-primary,#4176e6) 86%,#0f1115);background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#4176e6) 9%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary,#4176e6) 24%,transparent)}
+.bw_noteMuted{color:var(--dsw-alias-label-tertiary)}
+/* 动作行常驻面板底部：这个状态要你做的事永远在视野里，不会滚出屏幕 */
+.bw_foot{flex:none;padding:11px 16px 13px;border-top:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1,#fff)}
+.bw_actions{display:flex;align-items:center;gap:8px;margin-top:11px;border-radius:10px}
+.bw_actionsFocus{animation:bwPulse 1s ease-out 1}
+@keyframes bwPulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--dsw-alias-state-business-primary,#4176e6) 45%,transparent)}100%{box-shadow:0 0 0 12px transparent}}
+
+.bw_tl{position:relative;padding-left:14px}
+.bw_tlItem{position:relative;padding-bottom:11px}
+.bw_tlItem:before{content:"";position:absolute;left:-14px;top:5px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-label-tertiary);opacity:.55}
+.bw_tlHot:before{background:var(--dsw-alias-state-warn-primary,#f59e0b);opacity:1}
+.bw_tlItem:after{content:"";position:absolute;left:-11.5px;top:13px;bottom:0;width:1px;background:var(--dsw-alias-border-l2)}
+.bw_tlItem:last-child:after{display:none}
+.bw_tlTime{font-size:10.5px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.bw_tlText{font-size:12px;color:var(--dsw-alias-label-secondary);margin-top:1px}
+.bw_kv{display:flex;align-items:center;gap:8px;font-size:12px;padding:5px 0}
+.bw_kvK{color:var(--dsw-alias-label-tertiary);flex:none;min-width:52px}
+.bw_kvV{color:var(--dsw-alias-label-secondary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bw_hr{height:1px;background:var(--dsw-alias-border-l2);margin:14px 0}
+.bw_empty{padding:18px 12px;font-size:12px;color:var(--dsw-alias-label-tertiary);text-align:center}
+.bw_emptyAct{margin-top:10px;display:flex;justify-content:center}
+
+.bw_toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;pointer-events:none;z-index:200}
+.bw_toast{pointer-events:auto;display:flex;align-items:flex-start;gap:9px;box-sizing:border-box;width:320px;padding:10px 11px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;box-shadow:var(--dsw-elevation-prominent,0 8px 28px rgba(0,0,0,.18))}
+.bw_toastBody{min-width:0;flex:1}
+.bw_toastTitle{font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bw_toastText{font-size:11.5px;color:var(--dsw-alias-label-tertiary);margin-top:2px}
+.bw_toastAct{margin-top:8px;display:flex;gap:6px}
+.bw_toastX{flex:none;width:20px;height:20px;padding:0;font-size:14px;line-height:1;color:var(--dsw-alias-label-tertiary);background:transparent;border:0;border-radius:5px;cursor:pointer}
+.bw_toastX:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+
+/* ── 抓取条件条：城市 / 岗位关键词 / 距离 ──────────────────────────────────
+   和「需要我 / 等待回复」那组段控件刻意分开：那组回答"现在处理谁"（triage），
+   这组回答"抓什么"（query）。两者语义不同，混在一行会互相干扰。 */
+.bw_filters{display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1,#fff);flex:none;overflow:hidden}
+.bw_field{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 9px;font-size:12.5px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px solid transparent;border-radius:8px;flex:none}
+.bw_field:focus-within{border-color:var(--dsw-alias-border-l4)}
+.bw_fieldK{color:var(--dsw-alias-label-tertiary);font-size:11.5px}
+.bw_select,.bw_kw{font:inherit;font-size:12.5px;color:var(--dsw-alias-label-primary);background:transparent;border:0;outline:none}
+.bw_select{cursor:pointer;max-width:132px}
+.bw_kw{width:190px}
+/* 输入框右边那颗「搜」：回车和点它做的是同一件事 */
+.bw_kwGo{flex:none;height:20px;padding:0 9px;font:inherit;font-size:11.5px;color:#fff;background:var(--dsw-alias-state-business-primary,#4176e6);border:0;border-radius:6px;cursor:pointer}
+.bw_kwGo:hover{filter:brightness(1.12)}
+.bw_kwGo:disabled{opacity:.6;cursor:progress}
+.bw_count{margin-left:auto;font-size:12px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;flex:none}
+/* 抓取进度 / 结果条。错误（尤其是风控与登录失效）必须一眼看到 */
+.bw_scrape{display:flex;align-items:center;gap:7px;padding:0 14px;height:26px;font-size:12px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-module-platform,#f5f6f7);border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.bw_scrapeDot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-label-tertiary)}
+.bw_scrapeOk .bw_scrapeDot{background:var(--dsw-alias-state-success-primary,#22c55e)}
+.bw_scrapeBad{color:var(--dsw-alias-state-error-primary,#ec1313);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ec1313) 8%,transparent)}
+.bw_scrapeBad .bw_scrapeDot{background:var(--dsw-alias-state-error-primary,#ec1313)}
+.bw_demoTag{flex:none;padding:1px 6px;margin-right:4px;font-size:10.5px;color:var(--dsw-alias-label-tertiary);border:.5px dashed var(--dsw-alias-border-l3);border-radius:5px}
+.bw_emptyActs{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+
+/* 卡片上的地点行：城市·商圈 + 距你多远 */
+.bw_cardLoc{display:flex;align-items:center;gap:6px;margin-top:4px;font-size:11px;color:var(--dsw-alias-label-tertiary);min-width:0}
+.bw_locText{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.bw_locDist{margin-left:auto;flex:none;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary)}
+.bw_locNear{color:color-mix(in srgb,var(--dsw-alias-state-business-primary,#4176e6) 88%,#0f1115);font-weight:600}
+.bw_locUnknown{font-style:italic}
+
+/* ── 登录闸门：进工作台时没登录就把二维码顶上来 ─────────────────────────── */
+.bw_gate{position:absolute;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--dsw-alias-bg-mask-1,#0000003d) 70%,transparent)}
+.bw_gateCard{box-sizing:border-box;width:320px;padding:18px 20px 16px;border-radius:14px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2);box-shadow:var(--dsw-elevation-prominent,0 8px 28px rgba(0,0,0,.18));text-align:center}
+.bw_gateTitle{font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.bw_gateSub{margin-top:4px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary)}
+.bw_gateQr{margin:12px auto 0;width:180px;height:180px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2);background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.bw_gateQrImg{width:100%;height:100%;object-fit:contain}
+.bw_gatePhase{margin-top:10px;font-size:12.5px;color:var(--dsw-alias-label-secondary);min-height:18px}
+.bw_gateHot{color:var(--dsw-alias-state-warn-label,#dd8629)}
+.bw_gateBad{color:var(--dsw-alias-state-error-primary,#ec1313)}
+.bw_gateOk{color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#22c55e) 70%,#0f1115)}
+.bw_gateActs{margin-top:12px;display:flex;gap:8px;justify-content:center}
+.bw_spin{display:inline-block;width:11px;height:11px;border:1.5px solid var(--dsw-alias-border-l3);border-top-color:var(--dsw-alias-state-business-primary,#4176e6);border-radius:50%;animation:bwSpin .8s linear infinite;vertical-align:-1px;margin-right:5px}
+@keyframes bwSpin{to{transform:rotate(360deg)}}
+
+/* ── 余额：账号还剩多少钱 ────────────────────────────────────────────────── */
+.bw_bal{display:inline-flex;align-items:center;height:26px;padding:0 10px;border-radius:9px;background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px solid var(--dsw-alias-border-l2);font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;font-variant-numeric:tabular-nums}
+/* 会话区右下角：和 shell 自己的「用量 · 缓存命中」同一处。dock 是竖着排的，
+   所以这颗会落在那一行的正下方 —— width:100% + flex-end 让它贴右，
+   看起来就和「用量 · 缓存命中」同属右下角那一簇。 */
+.bw_balDock{width:100%;box-sizing:border-box;display:flex;justify-content:flex-end;padding:0 2px 2px}
+.bw_balPill{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:999px;background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px solid var(--dsw-alias-border-l2);font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;font-variant-numeric:tabular-nums}
+.bw_balWait{opacity:.65}
+.bw_balLow{color:var(--dsw-alias-state-error-primary,#ec1313)}
+
+/* ── 简历库 ────────────────────────────────────────────────────────────────
+   简历是**全局**的，所以它不能挂在"当前 JD"那块里 —— 右栏用两个面板叠起来：
+   上面「这个 JD 的进展」跟着选中项走，下面「简历库」永远在（可整体折叠）。 */
+.bw_colStack{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0}
+/* 两个面板平分右栏高度；收起简历库时它退回"只有一条标题栏" */
+.bw_colStack > .bw_col{flex:1 1 0;min-height:0}
+.bw_colStack > .bw_colLibOff{flex:0 0 auto}
+.bw_colLib{flex:1 1 0}
+.bw_libBar{display:flex;align-items:center;gap:6px;padding:8px 10px 8px 12px;border-bottom:1px solid var(--dsw-alias-border-l2);flex:none}
+.bw_libTitle{font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--dsw-alias-label-tertiary)}
+.bw_libN{font-size:11px;color:var(--dsw-alias-label-caption);font-variant-numeric:tabular-nums}
+.bw_libBody{flex:1;overflow-y:auto;min-height:0;padding:8px}
+.bw_drop{margin:0 2px 8px;padding:13px 10px;text-align:center;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform,#f5f6f7);border:1px dashed var(--dsw-alias-border-l3);border-radius:10px}
+.bw_dropHot{border-color:var(--dsw-alias-state-business-primary,#4176e6);color:var(--dsw-alias-label-primary)}
+.bw_dropAct{color:var(--dsw-alias-state-business-primary,#4176e6);cursor:pointer;text-decoration:underline;background:transparent;border:0;font:inherit;padding:0}
+.bw_rw{margin-bottom:6px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;overflow:hidden}
+.bw_rwOn{border-color:var(--dsw-alias-border-l3)}
+.bw_rwHead{display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box;padding:7px 8px;background:transparent;border:0;cursor:pointer;text-align:left;color:inherit;font:inherit}
+.bw_rwHead:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.bw_rwOn .bw_rwHead{background:var(--dsw-alias-bg-module-platform,#f5f6f7)}
+.bw_rwName{font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.bw_rwCaret{flex:none;font-size:10px;color:var(--dsw-alias-label-tertiary)}
+.bw_rwX{flex:none;width:18px;height:18px;padding:0;font-size:13px;line-height:1;color:var(--dsw-alias-label-tertiary);background:transparent;border:0;border-radius:5px;cursor:pointer}
+.bw_rwX:hover{color:var(--dsw-alias-state-error-primary,#ec1313);background:var(--dsw-alias-interactive-bg-hover)}
+.bw_rwBody{padding:2px 9px 9px;border-top:1px solid var(--dsw-alias-border-l1)}
+.bw_kv2{display:flex;gap:6px;font-size:11.5px;padding:3px 0;align-items:baseline}
+.bw_kv2K{color:var(--dsw-alias-label-tertiary);flex:none;min-width:38px}
+.bw_kv2V{color:var(--dsw-alias-label-secondary);min-width:0;word-break:break-word}
+.bw_skills{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+.bw_skill{font-size:10.5px;padding:1px 6px;border-radius:5px;background:var(--dsw-alias-bg-module-platform,#f5f6f7);color:var(--dsw-alias-label-secondary)}
+.bw_skillHit{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#22c55e) 14%,transparent);color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#22c55e) 70%,#0f1115)}
+.bw_bar{height:3px;border-radius:2px;background:var(--dsw-alias-border-l2);overflow:hidden;margin-top:5px}
+.bw_barFill{height:100%;background:var(--dsw-alias-state-business-primary,#4176e6);transition:width .15s linear}
+.bw_barDone{background:var(--dsw-alias-state-success-primary,#22c55e)}
+.bw_barBad{background:var(--dsw-alias-state-error-primary,#ec1313)}
+.bw_upRow{display:flex;flex-direction:column;gap:2px;padding:4px 2px}
+.bw_upTop{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dsw-alias-label-secondary)}
+.bw_upName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bw_upPct{flex:none;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary)}
+
+/* ── 与 shell 对齐：让侧栏里「Boss 工作台」这一行和新会话同款 ────────────────
+   这一行的外壳（button 元素 + 它的样式）归 ui-sidebar 所有，插件只提供图标，
+   所以只能靠 aria-label 命中自己那一行来做视觉对齐（下面所有选择器都带这个
+   aria-label，不会碰到别人的行）。
+   宽栏时行内是「图标 span + 标题 span」，收成轨道时只剩图标 span —— 用 :has()
+   只对宽栏套用新会话那套尺寸，轨道形态原样交还给 shell。
+   取的是 ui-sidebar 里 .newSession 的真实取值；active 保留一个更深的填充，
+   否则「哪个面板开着」就看不出来了。 */
+button[aria-label="${PANEL_LABEL}"]:has(> span + span){box-sizing:border-box;height:38px;margin:0 2px 8px;padding:8px 16px;justify-content:center;gap:6px;border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;background:var(--dsw-alias-button-elevated-fill);color:var(--dsw-alias-label-primary);font-size:14px;font-weight:500;line-height:22px;overflow:hidden}
+button[aria-label="${PANEL_LABEL}"]:has(> span + span):hover{background:var(--dsw-alias-button-floating-hover)}
+button[aria-label="${PANEL_LABEL}"]:has(> span + span)[aria-current="page"]{background:var(--dsw-alias-interactive-bg-active);border-color:var(--dsw-alias-border-l4)}
+button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-box;width:36px;height:36px;margin:0;padding:0;border:0;border-radius:8px;background:transparent;justify-content:center}
+
+</style></head>
+<body><div id="frame"><div class="bw_page"><div class="bw_head"><span class="bw_title">Boss 直聘工作台</span><button type="button" class="bw_btn bw_btnGo" disabled="false" title="没有关键词，就抓 Boss 的推荐流">抓取岗位</button><span class="bw_spacer"></span><span class="bw_bal bw_balLow" title="CNY 总额 8.04　赠送 0　充值 8.04　更新于 2026-09-17T10:00:00Z　⚠ 余额偏低">余额 ¥8.04</span><div class="bw_tallies"><button type="button" class="bw_tally bw_tallyHot bw_tallyOn" aria-pressed="true"><span class="bw_dot"></span>需要我<span>3</span></button><button type="button" class="bw_tally" aria-pressed="false">等待回复<span>1</span></button><button type="button" class="bw_tally" aria-pressed="false">全部<span>7</span></button></div></div><div class="bw_filters"><span class="bw_field"><span class="bw_fieldK">城市</span><select class="bw_select" value=""><option value="" selected="true">不限</option><option value="北京">北京</option><option value="杭州">杭州</option><option value="深圳">深圳</option></select></span><span class="bw_field"><span class="bw_fieldK">岗位</span><input class="bw_kw" value="" placeholder="公司 / 职位 / JD 关键词，回车去 Boss 搜"><button type="button" class="bw_kwGo" disabled="false" title="留空 → 抓推荐流">搜</button></span><span class="bw_field"><span class="bw_fieldK">距离</span><select class="bw_select" value=""><option value="" selected="true">不限</option><option value="3">3km 内</option><option value="5">5km 内</option><option value="10">10km 内</option></select></span><span class="bw_count">筛出 1 / 共 7 个岗位</span></div><div class="bw_cols"><div class="bw_col"><div class="bw_colHead"><span>JD 队列</span><span class="bw_tag">只看 已回复<button type="button" class="bw_tagX" title="清除筛选">×</button></span><span class="bw_spacer"></span><span class="bw_demoTag" title="还没有抓到真岗位，下面是演示数据">演示数据</span><span style="font-weight:400;letter-spacing:0">1</span></div><div class="bw_scroll"><div class="bw_group"><div class="bw_groupHead bw_groupHot"><span class="bw_dot"></span><span>需要我</span><span class="bw_groupN">1</span></div><div class="bw_card bw_cardOn" role="button" tabindex="0"><div class="bw_cardTop"><span class="bw_co">云启数据</span><span class="bw_sal">30-50K</span></div><div class="bw_role">数据平台工程师</div><div class="bw_meta"><button type="button" class="bw_chip bw_chipOk bw_chipBtn" title="只看「已回复」，并跳到这个状态要做的事">已回复</button><span class="bw_chip">数据平台_云启_v1.pdf</span></div><div class="bw_cardLoc"><span class="bw_locText">北京 · 海淀区 · 上地</span><span class="bw_locDist bw_locUnknown">距离未知</span></div></div></div></div></div><div class="bw_col bw_colMid"><div class="bw_colHead"><span>当前 JD</span><span class="bw_spacer"></span><span class="bw_chip bw_chipOk">已回复</span></div><div class="bw_scroll"><div class="bw_detail"><div class="bw_dTitle">云启数据 · 数据平台工程师</div><div class="bw_dSub">30-50K　·　北京 · 5-10年　·　海淀区 · 上地　·　距离未知　·　HR 赵女士</div><div class="bw_sect"><div class="bw_sectHead"><span>JD 全文</span></div><div class="bw_jd">岗位职责：
+1. 负责数据平台的建设与维护；
+2. 支撑业务方的数据需求。
+
+任职要求：
+1. 熟悉 Flink / Spark；
+2. 有数据仓库建模经验。</div></div><div class="bw_sect"><div class="bw_sectHead"><span>简历</span><span class="bw_spacer"></span><span class="bw_chip">每个 JD 各选一份</span></div><div class="bw_pick"><span class="bw_pickFile"><span>📄</span><span class="bw_pickName">数据平台_云启_v1.pdf</span></span><span class="bw_pickNote">已就绪</span><button type="button" class="bw_btn">换</button><button type="button" class="bw_btn">让 agent 按 JD 改</button></div></div><div class="bw_sect"><div class="bw_sectHead"><span>打招呼语</span></div><textarea class="bw_ta" placeholder="还没有生成打招呼语">您好，我对贵司的数据平台工程师岗位很感兴趣，想了解下团队目前的技术栈。</textarea></div></div></div><div class="bw_foot"><div class="bw_note bw_noteOk">招聘者回复了你。回复率随时间衰减，建议尽快回话。</div><div class="bw_actions bw_actionsFocus"><button type="button" class="bw_btn">重新生成</button><span class="bw_spacer"></span><button type="button" class="bw_btn">跳过</button><button type="button" class="bw_btn bw_btnPrimary">去回话 ▸</button></div></div></div><div class="bw_colStack"><div class="bw_col"><div class="bw_colHead">这个 JD 的进展</div><div class="bw_scroll"><div class="bw_detail"><div class="bw_sect" style="margin-top:0"><div class="bw_sectHead"><span>时间线</span></div><div class="bw_tl"><div class="bw_tlItem"><div class="bw_tlTime">昨天 15:20</div><div class="bw_tlText">抓取岗位</div></div><div class="bw_tlItem"><div class="bw_tlTime">昨天 15:22</div><div class="bw_tlText">发送简历与打招呼语</div></div><div class="bw_tlItem bw_tlHot"><div class="bw_tlTime">11:30</div><div class="bw_tlText">招聘者回复了你</div></div></div></div><div class="bw_hr"></div><div><div class="bw_kv"><span class="bw_kvK">状态</span><span class="bw_chip bw_chipOk">已回复</span></div><div class="bw_kv"><span class="bw_kvK">简历</span><span class="bw_kvV">数据平台_云启_v1.pdf</span></div><div class="bw_kv"><span class="bw_kvK">会话</span><span class="bw_kvV">—</span><button type="button" class="bw_btn">打开会话</button></div></div><div class="bw_sect"><div class="bw_sectHead"><span>招聘者回复</span></div><div class="bw_jd" style="max-height:120">你好，方便发一份详细简历吗？另外想问下你目前的到岗时间。</div></div></div></div></div><div class="bw_col bw_colLib"><div class="bw_libBar"><span class="bw_libTitle">简历库</span><span class="bw_libN">0/0</span><span class="bw_spacer"></span><button type="button" class="bw_btn" title="重新扫描 resumes/ 目录">重扫</button><button type="button" class="bw_btn bw_btnPrimary">上传</button><button type="button" class="bw_btn" title="收起简历库">▾</button></div><div class="bw_libBody"><input type="file" multiple="true" style="display:none" accept=".pdf,.docx,.doc,.md,.txt,.html,.json"><div class="bw_drop">把简历拖进来，或 <button type="button" class="bw_dropAct">点这里选文件</button><br>PDF / Word(.docx) / Markdown，一次可以多份</div><div class="bw_empty">还没有简历</div></div></div></div></div></div></div></body></html>

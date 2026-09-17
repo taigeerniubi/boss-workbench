@@ -1,0 +1,32 @@
+{
+  "name": "dsh-boss-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Boss 直聘投递流水线工作台 — DSH Web 客户端 UI 插件",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
+    }
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js"
+  ]
+}
