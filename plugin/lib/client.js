@@ -2047,8 +2047,8 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 							),
 						)
 					: null,
-				// 连不上 Chrome：说清楚是哪一步断了、怎么修，而不是弹一个等扫码的框 ——
-				// 那种框会让人以为"扫一下就好了"，实际是调试口根本没开。
+				// 连不上 Chrome：说清楚是哪一步断了、怎么修。
+				// 「帮我启动 Chrome」是关键 —— 用户不该为了用插件去敲命令行（见 boss/auto-chrome.mjs）。
 				offline !== null && offline.reason
 					? h(
 							"div",
@@ -2060,21 +2060,22 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 								"连不上本机 Chrome 调试会话" +
 									(offline.code ? `（${offline.code}）` : "") +
 									`：${offline.reason}` +
-									"　·　修法：先完全退出 Chrome，再用 --remote-debugging-port=9222 启动，然后在该 Chrome 里打开并登录 Boss。" +
-									"工作台里已经抓到的岗位、简历库和监听条件都还在，不受影响。",
+									"　·　插件会自动用「插件自己的」窗口拉起一个可调试的 Chrome（不碰你日常那个窗口）。" +
+									"工作台里已抓到的岗位、简历库和监听条件都还在，不受影响。",
 							),
 							h(
 								"button",
 								{
 									type: "button",
-									className: "bw_btn",
+									className: "bw_btn bw_btnPrimary",
 									onClick: async () => {
 										dismissOffline();
-										await postJson("/boss/login/start", { force: true });
+										// force=1：绕过状态缓存，重新走一次"连不上就自己拉起"
+										await postJson("/boss/login/start?force=1");
 										loadState();
 									},
 								},
-								"重新连接",
+								"帮我启动 Chrome",
 							),
 							h("button", { type: "button", className: "bw_btn", onClick: dismissOffline }, "先不管"),
 						)

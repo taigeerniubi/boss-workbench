@@ -32,6 +32,9 @@ import {
 	DEFAULT_MODEL, LLM_ENDPOINT, MAX_DRAFT_CHARS, SYSTEM_PROMPT,
 	buildUserPrompt, draftWithLlm, mergeAdvice, normalizeDrafts, parseDrafts, resumeToPromptText,
 } from "./reply-llm.mjs";
+import {
+	browserCandidates, buildLaunchArgs, ensureDebuggableChrome, findLaunchable, probeCdp, realProfileDir, userDataDirFor,
+} from "./auto-chrome.mjs";
 let pass = 0;
 const fail = [];
 async function check(name, fn) {
@@ -693,6 +696,195 @@ await check("统一约束：生成句子的模块里没有任何发送代码", a
 	const source = await import("node:fs").then((fs) => fs.readFileSync(new URL("./reply-llm.mjs", import.meta.url), "utf8"));
 	// 用户划的边界：模型只写句子，发不发由人按。这里做一条静态护栏。
 	assert.equal(/mqtt|publish|sendChatMessage|friend\/add/u.test(source), false, "生成模块里不该出现任何发送动作");
+});
+//#endregion
+
+//#region 9. 进工作台就把 Chrome 准备好（用户不敲命令行）
+section("9. 自动拉起可调试 Chrome：参数正确、不碰用户日常 profile、等端口就绪");
+
+await check("启动参数带调试口 + 插件自己的 user-data-dir + 直接开 Boss 职位页", () => {
+	const args = buildLaunchArgs({ port: 9222, userDataDir: "C:\\fake\\profile" });
+	assert.ok(args.includes("--remote-debugging-port=9222"), "必须有调试口参数");
+	assert.ok(args.includes("--user-data-dir=C:\\fake\\profile"), "必须用指定的 profile");
+	assert.ok(args.some((a) => a.endsWith("/web/geek/jobs")), "第一个窗口直接开到 Boss 职位页");
+	// 关键：不能出现 kill 语义，也不该指向某个"看起来像用户默认配置"的路径
+	assert.equal(args.some((a) => /--kill|taskkill/u.test(a)), false, "不能有任何 kill 语义");
+});
+
+await check("候选浏览器：只在装了的里面挑；把试过哪些带出来", () => {
+	const exists = (p) => /Google[\\/]Chrome/u.test(p) || /Microsoft[\\/]Edge/u.test(p);
+	const all = browserCandidates({ env: { ProgramFiles: "C:\\PF", "ProgramFiles(x86)": "C:\\PF86", LOCALAPPDATA: "C:\\LA" }, exists, platform: "win32" });
+	assert.ok(all.length > 0);
+	assert.ok(all.every((c) => exists(c.path)), "只返回真实存在的可执行文件");
+	assert.ok(all.some((c) => c.name === "Chrome"), "Chrome 要在候选里");
+	// 只有真的装了 Edge 才断言 —— 不能因为测试机没装就判失败
+	if (all.some((c) => c.name === "Edge")) assert.ok(all.some((c) => c.name === "Edge"), "装了 Edge 就必须把它算进候选（Chrome 正开着时它是活路）");
+	assert.deepEqual(browserCandidates({ env: {}, exists: () => false, platform: "win32" }), [], "一个都没有时返回空数组");
+	const mac = browserCandidates({ env: {}, exists: (p) => p.includes("Google Chrome.app"), platform: "darwin" });
+	assert.match(String(mac[0]?.path), /Google Chrome\.app/u, "macOS 路径也要覆盖");
+	const linux = browserCandidates({ env: {}, exists: (p) => p === "/usr/bin/chromium", platform: "linux" });
+	assert.equal(linux[0]?.path, "/usr/bin/chromium", "Linux 路径也要覆盖");
+});
+
+await check("挑候选：优先当前没在运行的那个（不会撞单实例合并）", () => {
+	const exists = () => true;
+	const env = { ProgramFiles: "C:\\PF", "ProgramFiles(x86)": "C:\\PF86", LOCALAPPDATA: "C:\\LA" };
+	const chromeBusy = findLaunchable({ running: { chrome: true, edge: false }, exists, env, platform: "win32" });
+	assert.equal(chromeBusy.pick?.name, "Edge", "Chrome 开着就挑 Edge");
+	const edgeBusy = findLaunchable({ running: { chrome: false, edge: true }, exists, env, platform: "win32" });
+	assert.equal(edgeBusy.pick?.name, "Chrome", "Edge 开着就挑 Chrome");
+	const bothBusy = findLaunchable({ running: { chrome: true, edge: true }, exists, env, platform: "win32" });
+	assert.equal(bothBusy.pick, null, "两个都开着 → 没有可挑的（进程探测那条路走到头）");
+	assert.ok(bothBusy.free.length === 0);
+});
+
+await check("profile 选择：没在运行的浏览器才复用它自己的 profile", () => {
+	const chrome = { name: "Chrome", path: "C:\\PF\\chrome.exe" };
+	const edge = { name: "Edge", path: "C:\\PF86\\msedge.exe" };
+	assert.equal(userDataDirFor(chrome, { chrome: true }, "C:\\plugin-profile"), "C:\\plugin-profile", "Chrome 开着就绝不用它的 profile");
+	assert.equal(userDataDirFor(chrome, { chrome: false }, "C:\\plugin-profile"), realProfileDir("Chrome") ?? "C:\\plugin-profile", "没在跑就复用它的 profile（登录态在里面）");
+	assert.equal(userDataDirFor(edge, { edge: false }, "C:\\plugin-profile"), realProfileDir("Edge") ?? "C:\\plugin-profile");
+	assert.equal(userDataDirFor({ name: "自定义", path: "x" }, {}, "C:\\plugin-profile"), "C:\\plugin-profile", "自定义路径不猜 profile");
+});
+
+await check("已在监听时什么都不做（不重复 spawn）", async () => {
+	let spawned = 0;
+	const result = await ensureDebuggableChrome({
+		spawnImpl: () => { spawned++; return { unref() {} }; },
+		fetchImpl: async () => ({ ok: true, json: async () => ({ Browser: "Chrome/145" }) }),
+	});
+	assert.equal(result.ok, true);
+	assert.equal(result.already, true);
+	assert.equal(spawned, 0, "端口已经在监听就不该再拉一个浏览器");
+});
+
+await check("没在监听时按参数拉起，并轮询到端口就绪；detached 不带走浏览器", async () => {
+	const calls = { spawn: [], argv: null };
+	let up = false;
+	const fetchImpl = async () => {
+		if (!up) throw new Error("ECONNREFUSED");
+		return { ok: true, json: async () => ({ Browser: "Chrome/145" }) };
+	};
+	const result = await ensureDebuggableChrome({
+		port: 9222,
+		userDataDir: "C:\\fake\\profile",
+		waitMs: 3000,
+		fetchImpl,
+		running: { known: true, chrome: false, edge: false },
+		spawnImpl: (path, argv, opts) => {
+			calls.spawn.push({ path, opts });
+			calls.argv = argv;
+			setTimeout(() => { up = true; }, 400);
+			return { unref() {} };
+		},
+	});
+	assert.equal(result.ok, true, result.error);
+	assert.equal(result.launched, true);
+	assert.equal(calls.spawn.length, 1, "只该拉一次");
+	assert.equal(calls.spawn[0].opts.detached, true, "必须 detached：宿主重启不能把浏览器一起带走");
+	assert.ok(calls.argv.includes("--remote-debugging-port=9222"));
+	assert.equal(result.browser, "Chrome/145");
+});
+
+await check("第一轮（复用浏览器 profile）失败 → 第二轮用插件自己的 profile，且换浏览器试", async () => {
+	const attempts = [];
+	let up = false;
+	const fetchImpl = async (url) => {
+		if (!up) throw new Error("ECONNREFUSED");
+		return { ok: true, json: async () => ({ Browser: "Edg/153" }) };
+	};
+	const result = await ensureDebuggableChrome({
+		port: 9222,
+		userDataDir: "C:\\plugin-profile",
+		waitMs: 1200,
+		fetchImpl,
+		running: { known: true, chrome: false, edge: false },
+		spawnImpl: (path, argv) => {
+			const dir = argv.find((a) => a.startsWith("--user-data-dir="));
+			attempts.push({ path, dir });
+			// 只有"插件自己的 profile + Edge"才成功 —— 模拟 Chrome 撞单实例
+			if (path.includes("msedge") && dir === "--user-data-dir=C:\\plugin-profile") setTimeout(() => { up = true; }, 200);
+			return { unref() {} };
+		},
+	});
+	assert.equal(result.ok, true, result.error);
+	assert.equal(result.name, "Edge", "Chrome 起不来就该换 Edge 再试");
+	assert.equal(result.reusedProfile, false, "第二轮用的是插件自己的 profile");
+	assert.ok(attempts.length >= 2, `应该试了多轮，实际 ${attempts.length} 次`);
+	assert.ok(new Set(attempts.map((a) => a.dir)).size >= 2, "两轮用的 profile 不同");
+});
+
+await check("探测不可用时不当成『没在跑』—— 第一轮仍会用插件自己的 profile 兜底", async () => {
+	const attempts = [];
+	let up = false;
+	const result = await ensureDebuggableChrome({
+		port: 9222,
+		userDataDir: "C:\\plugin-profile",
+		waitMs: 1000,
+		fetchImpl: async () => { if (!up) throw new Error("down"); return { ok: true, json: async () => ({ Browser: "x" }) }; },
+		running: { known: false, chrome: null, edge: null },
+		spawnImpl: (path, argv) => {
+			attempts.push(argv.find((a) => a.startsWith("--user-data-dir=")));
+			setTimeout(() => { up = true; }, 150);
+			return { unref() {} };
+		},
+	});
+	assert.equal(result.ok, true, result.error);
+	assert.equal(result.reusedProfile, false, "探测不可用时不能去动用户真实 profile");
+	assert.ok(attempts.every((d) => d === "--user-data-dir=C:\\plugin-profile"), `不该碰真实 profile，实际：${attempts.join(", ")}`);
+});
+
+await check("全都起不来 → 报出每一轮的结果 + 可执行的下一步，而不是无限等", async () => {
+	const result = await ensureDebuggableChrome({
+		waitMs: 1000,
+		fetchImpl: async () => { throw new Error("ECONNREFUSED"); },
+		spawnImpl: () => ({ unref() {} }),
+		running: { known: true, chrome: true, edge: true },
+	});
+	assert.equal(result.ok, false);
+	assert.match(result.error, /单实例/u, "要点出最常见的原因");
+	assert.match(result.error, /完全退出/u, "要给出可执行的下一步");
+	assert.ok(Array.isArray(result.failures) && result.failures.length > 0, "要把每轮失败原因带出来");
+});
+
+await check("BOSS_AUTO_CHROME=0 时绝不动手", async () => {
+	const previous = process.env.BOSS_AUTO_CHROME;
+	process.env.BOSS_AUTO_CHROME = "0";
+	try {
+		const result = await ensureDebuggableChrome({
+			spawnImpl: () => { throw new Error("不该 spawn"); },
+			fetchImpl: async () => { throw new Error("ECONNREFUSED"); },
+		});
+		assert.equal(result.ok, false);
+		assert.match(result.error, /BOSS_AUTO_CHROME/u);
+	} finally {
+		if (previous === undefined) delete process.env.BOSS_AUTO_CHROME;
+		else process.env.BOSS_AUTO_CHROME = previous;
+	}
+});
+
+await check("端口探测：/json/version 出 JSON 才算就绪；异常不算", async () => {
+	assert.equal((await probeCdp(9222, { fetchImpl: async () => ({ ok: true, json: async () => ({ Browser: "Chrome/145" }) }) })).up, true);
+	assert.equal((await probeCdp(9222, { fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }) })).up, false);
+	assert.equal((await probeCdp(9222, { fetchImpl: async () => { throw new Error("ECONNREFUSED"); } })).up, false);
+});
+
+await check("自动拉起只在一处触发：连不上时才试，且每进程只试一次", async () => {
+	const source = await import("node:fs").then((fs) => fs.readFileSync(new URL("./browser-channel.mjs", import.meta.url), "utf8"));
+	assert.match(source, /autoLaunch && !autoLaunchAttempted/u, "要有每进程只试一次的闸门");
+	assert.match(source, /ensureDebuggableChrome/u);
+	// 抓取/读会话这些高频路径不该自己拉浏览器
+	const jobs = await import("node:fs").then((fs) => fs.readFileSync(new URL("./jobs.mjs", import.meta.url), "utf8"));
+	assert.equal(/auto-chrome|ensureDebuggableChrome/u.test(jobs), false, "抓取路径不该 spawn 浏览器");
+	const messages = await import("node:fs").then((fs) => fs.readFileSync(new URL("./messages.mjs", import.meta.url), "utf8"));
+	assert.equal(/auto-chrome|ensureDebuggableChrome/u.test(messages), false, "读会话路径不该 spawn 浏览器");
+});
+
+await check("静态护栏：这个模块里没有任何杀进程/结束用户的浏览器的动作", async () => {
+	const source = await import("node:fs").then((fs) => fs.readFileSync(new URL("./auto-chrome.mjs", import.meta.url), "utf8"));
+	for (const banned of ["taskkill", "pkill", "killall", "Stop-Process", ".kill("]) {
+		assert.equal(source.includes(banned), false, `不该出现 ${banned}`);
+	}
 });
 //#endregion
 

@@ -5,6 +5,7 @@
  * fetch。它不引用 boss-agent-cli 的包、文件或运行时。
  */
 import { loadChromium } from "./playwright.mjs";
+import { ensureDebuggableChrome } from "./auto-chrome.mjs";
 import { SITE, effectiveCookieHeader } from "./lib.mjs";
 
 export const DEFAULT_CDP_URL = process.env.BOSS_CDP_URL ?? "http://127.0.0.1:9222";
@@ -49,33 +50,79 @@ export async function selectExistingBossSession(contexts) {
 }
 
 let cached = null;
+/** 自动拉起 Chrome 每进程只试一次 —— 失败就等用户点「重新连接」，别每次读状态都去 spawn。 */
+let autoLaunchAttempted = false;
 
 /**
- * 连接现有 Chrome。不会 launch，不会创建 context，也不会关闭用户的浏览器。
- * regular 模式还要求已经存在 Boss 页面；找不到就 fail closed。
+ * 连现有 Chrome；**连不上就先把 Chrome 拉起来再连一次**。
+ *
+ * `autoLaunch` 只在"用户没在操作、只是打开工作台看状态"时打开（`/boss/state`）。
+ * 每次抓取/读取会话都去 spawn 一次浏览器是不对的。
  */
-export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chromium: suppliedChromium = null, requirePage = true } = {}) {
+export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chromium: suppliedChromium = null, requirePage = true, autoLaunch = false } = {}) {
 	const safeUrl = assertLoopbackCdpUrl(cdpUrl);
 	if (cached?.browser?.isConnected?.()) {
 		const picked = await selectExistingBossSession(cached.browser.contexts());
 		if (picked !== null && (!requirePage || picked.page !== null)) return { ...picked, browser: cached.browser, cdpUrl: safeUrl };
 	}
 	const chromium = suppliedChromium ?? await loadChromium();
+	/** 自动拉起可能落在别的端口上（9222 被别的调试器占着），所以连接地址要跟着 boot 结果走。 */
+	let effectiveUrl = safeUrl;
 	let browser;
 	try {
 		browser = await chromium.connectOverCDP(safeUrl, { timeout: 5000 });
-	} catch (err) {
-		throw new BrowserSessionError(
-			"CDP_UNAVAILABLE",
-			`没有找到可复用的 Chrome 调试会话（${safeUrl}）。请先用 --remote-debugging-port=9222 启动 Chrome，并在里面登录 Boss。${String(err?.message ?? "").includes("ECONNREFUSED") ? "" : ""}`,
-		);
+	} catch {
+		// 连不上通常是两种情况之一：① 浏览器没带调试参数启动；② 压根没开着。
+		// 与其让用户去敲命令行，不如插件自己起一个（挑没在跑的浏览器 + 插件自己的 profile）。
+		let boot = null;
+		if (autoLaunch && !autoLaunchAttempted) {
+			autoLaunchAttempted = true;
+			boot = await ensureDebuggableChrome({ port: Number(new URL(safeUrl).port || 80) });
+			if (!boot.ok) throw new BrowserSessionError("CDP_UNAVAILABLE", describeBootFailure(boot));
+			effectiveUrl = `http://127.0.0.1:${boot.port}`;
+		}
+		if (boot === null) {
+			throw new BrowserSessionError(
+				"CDP_UNAVAILABLE",
+				`没有找到可复用的浏览器调试会话（${safeUrl}）。` +
+					`如果本机浏览器已经在跑，它没法被追加调试参数 —— 完全退出其中一个（Chrome 或 Edge）后点「帮我启动浏览器」，` +
+					`或按 README「启动真实 Chrome 会话」那节手动带 --remote-debugging-port=9222 启动。`,
+			);
+		}
+		try {
+			// 冷启动的浏览器需要一点时间把 context 建起来
+			await new Promise((resolve) => setTimeout(resolve, 800));
+			browser = await chromium.connectOverCDP(effectiveUrl, { timeout: 8000 });
+		} catch (err2) {
+			throw new BrowserSessionError(
+				"CDP_UNAVAILABLE",
+				`${boot.name ?? "浏览器"} 的调试口已经在 ${effectiveUrl} 监听了，但 Playwright 连不上它：${String(err2?.message ?? err2)}\n` +
+					`（这通常是 Playwright 没装好，而不是浏览器的问题：npm i -D playwright）`,
+			);
+		}
 	}
-	cached = { browser, cdpUrl: safeUrl };
+	cached = { browser, cdpUrl: effectiveUrl };
 	browser.on?.("disconnected", () => { if (cached?.browser === browser) cached = null; });
 	const picked = await selectExistingBossSession(browser.contexts());
-	if (picked === null) throw new BrowserSessionError("BROWSER_SESSION_NOT_FOUND", "Chrome 里没有可复用的 Boss 页面或登录态");
-	if (requirePage && picked.page === null) throw new BrowserSessionError("BOSS_PAGE_NOT_FOUND", "Chrome 已登录 Boss，但没有打开 Boss 页面；请先打开职位页再重试");
-	return { ...picked, browser, cdpUrl: safeUrl };
+	if (picked === null) throw new BrowserSessionError("BROWSER_SESSION_NOT_FOUND", "浏览器里没有可复用的 Boss 页面或登录态");
+	if (requirePage && picked.page === null) throw new BrowserSessionError("BOSS_PAGE_NOT_FOUND", "浏览器已登录 Boss，但没有打开 Boss 页面；请先打开职位页再重试");
+	return { ...picked, browser, cdpUrl: effectiveUrl };
+}
+
+/** 自动拉起失败时，把"能做什么"讲成人话。 */
+function describeBootFailure(boot) {
+	const lines = [
+		boot.error ?? "没能拉起可调试的 Chrome",
+	];
+	if (boot.path) lines.push(`用到的浏览器：${boot.path}`);
+	if (Array.isArray(boot.tried) && boot.tried.length > 0) lines.push(`找过这些位置：\n  ${boot.tried.join("\n  ")}`);
+	lines.push("也可以在「设置 → 环境变量」里给 BOSS_CHROME_PATH 指定 chrome.exe 的绝对路径，或设 BOSS_AUTO_CHROME=0 关掉自动拉起。");
+	return lines.join("\n");
+}
+
+/** 供测试重置每进程只试一次的闸门。 */
+export function resetAutoLaunchForTests() {
+	autoLaunchAttempted = false;
 }
 
 /** 在现有页面的 JS 环境中只发一次 fetch；cookie、浏览器指纹和出口网络自然一致。 */

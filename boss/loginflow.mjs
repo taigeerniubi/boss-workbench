@@ -10,6 +10,7 @@ import {
 	classifyBossResponse,
 	connectExistingBossBrowser,
 	existingBrowserStatus,
+	resetAutoLaunchForTests,
 } from "./browser-channel.mjs";
 import { SITE, clearSession, effectiveCookieHeader, markCooldown, parseCookieJar, saveSession } from "./lib.mjs";
 
@@ -78,15 +79,21 @@ async function verifyOnce() {
 	}
 }
 
-/** 连接现有 Chrome；没有登录时在该 context 里打开一个可见登录页。 */
-export async function startLogin({ force = false } = {}) {
+/**
+ * 连接现有 Chrome。连不上就**先由插件自己把可调试的 Chrome 拉起来**，
+ * 再用那个窗口去登录/复用 —— 用户不该为了用插件去记 `--remote-debugging-port`。
+ *
+ * `autoLaunch` 只在"用户刚进工作台 / 点了重新连接"这类入口为 true；
+ * 抓取和读会话不重复触发（见 browser-channel 里那个每进程只试一次的闸门）。
+ */
+export async function startLogin({ force = false, autoLaunch = true } = {}) {
 	if (!force && ["waiting-browser", "verifying", "logged-in"].includes(flow.phase) && Date.now() - flow.startedAt < EXPIRE_MS) {
 		return { ok: true, resumed: true, ...snapshot() };
 	}
-	flow = { phase: "connecting-browser", startedAt: Date.now(), error: null, detail: "正在连接本机 Chrome…", context: null, page: null, ownedPage: false, finalizing: false, account: null };
+	flow = { phase: "connecting-browser", startedAt: Date.now(), error: null, detail: "正在连接本机 Chrome（没开调试口的话会自动拉起一个）…", context: null, page: null, ownedPage: false, finalizing: false, account: null };
 	let linked;
 	try {
-		linked = await connectExistingBossBrowser({ requirePage: false });
+		linked = await connectExistingBossBrowser({ requirePage: false, autoLaunch });
 	} catch (err) {
 		const code = err instanceof BrowserSessionError ? err.code : "CDP_ERROR";
 		return { ok: false, ...setPhase("browser-unavailable", { error: String(err?.message ?? err), detail: code }) };
@@ -122,10 +129,18 @@ export async function pollLogin() {
 	}
 }
 
-/** 状态检查只看现有浏览器/cookie，不在页面挂载时额外请求 Boss。 */
-export async function loginState({ force = false } = {}) {
+/**
+ * 状态检查。
+ *
+ * `autoLaunch: true` 是**"进工作台就帮你把 Chrome 准备好"**的入口：
+ * 9222 没在监听时插件自己拉一个可调试的 Chrome（用插件自己的 profile，
+ * 不碰用户日常那个窗口），然后报告登录态。整个过程用户不用敲任何命令。
+ *
+ * 只在没有缓存时才会去连，所以不会每次渲染都 spawn 浏览器。
+ */
+export async function loginState({ force = false, autoLaunch = true } = {}) {
 	if (!force && stateCache.value !== null && Date.now() - stateCache.at < STATE_TTL_MS) return { ...stateCache.value, present: true, cached: true };
-	const status = await existingBrowserStatus();
+	const status = await existingBrowserStatus({ autoLaunch });
 	const value = status.ok
 		? { loggedIn: status.loggedIn && status.hasPage, flagged: false, code: null, message: status.loggedIn ? (status.hasPage ? "Chrome 已登录" : "请在 Chrome 打开 Boss 页面") : "Chrome 中尚未登录", source: "cdp", browser: status }
 		: { loggedIn: false, flagged: false, code: status.code, message: status.error, source: "cdp", browser: status };
@@ -138,6 +153,8 @@ export async function logout() {
 	clearSession();
 	flow = { phase: "idle", startedAt: 0, error: null, detail: null, context: null, page: null, ownedPage: false, finalizing: false, account: null };
 	stateCache = { at: 0, value: null };
+	// 退出登录之后允许下一次再自动拉一次浏览器（用户可能把窗口关了）
+	resetAutoLaunchForTests();
 	return { ok: true, clearedCookies: 0, browserCookiesUntouched: true, at: new Date().toISOString() };
 }
 

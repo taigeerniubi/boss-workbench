@@ -445,9 +445,10 @@ const offlineView = render(mainEntry.component, {}, {
 const offlineText = offlineView.join("\n");
 check(offlineText.includes("连不上本机 Chrome 调试会话"), "连不上 Chrome 时给一条说明带，而不是等扫码");
 check(offlineText.includes("CDP_UNAVAILABLE") && offlineText.includes("9222"), "说明带带上错误码与调试端口，便于自查");
-check(offlineText.includes("--remote-debugging-port=9222"), "说明带给出可执行的修法");
-check(offlineText.includes("重新连接") && offlineText.includes("先不管"), "说明带能重连也能先不管（不挡着用已有的岗位库）");
+check(offlineText.includes("不碰你日常那个窗口"), "说清楚插件拉的是自己的窗口，不动用户日常 Chrome");
+check(offlineText.includes("帮我启动 Chrome") && offlineText.includes("先不管"), "说明带能一键拉起 Chrome，也能先不管（不挡着用已有的岗位库）");
 check(!offlineText.includes("在真实 Chrome 标签中完成扫码"), "连不上时不能催扫码（那个码根本不存在）");
+check(!offlineText.includes("--remote-debugging-port"), "不再让用户去敲命令行参数");
 
 console.log("\n── 14. 找岗位（真实数据 + 搜索入口）──");
 // hook 7 = GET /boss/state 的结果。这一段专门盯"列表到底跟着谁走"。
