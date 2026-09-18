@@ -537,6 +537,11 @@ check(assistedText.includes("发送给 Boss") && assistedText.includes("60502932
 check(assistedText.includes("生成话术") && assistedText.includes("发送打招呼"), "打招呼语有生成与发送两个入口");
 check(assistedText.includes("Boss：明天下午方便面试吗？") && assistedText.includes("方便确认具体时间"), "展示当前岗位会话与基于上下文的回复草稿");
 
+// 演示岗位不能操作：点了只会 404，所以直接说清楚，并把按钮禁掉
+const demoDetail = render(mainEntry.component, {}, { 0: "j1" }).join("\n");
+check(demoDetail.includes("这是演示数据"), "选中演示岗位时说明带告诉你它不能操作");
+check(demoDetail.includes("抓取岗位") && demoDetail.includes("9222"), "说明带给出下一步：去抓真岗位，并点出 9222 这个常见根因");
+
 // 没有真数据时，必须一眼看出这是演示数据
 const demoView = render(mainEntry.component, {}, { 0: "j1" });
 check(demoView.join("\n").includes("演示数据"), "还没抓到岗位时，列表上挂着「演示数据」标");

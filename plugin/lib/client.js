@@ -745,6 +745,16 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			// （这一层刻意不新增 useState，避免打乱 smoke.mjs 依赖的 hook 序号）。
 			const sending = remote?.assistant?.jobId === app.id && remote?.assistant?.sending === true;
 			const greet = remote?.greet?.jobId === app.id ? remote.greet : null;
+			/**
+			 * 演示数据不能操作。
+			 *
+			 * 这是"啥也点不了"的真正来源：`data/jobs.json` 是空的（一次都没抓成功），
+			 * 左栏那 7 条是硬编码的演示岗位。它们的 id 不在岗位库里，于是
+			 * 「获取完整 JD」「读取会话」「按 JD 微调」「发送」全部走不通 ——
+			 * 宿主每条都回 404/409，界面上看起来就是"点了没用"。
+			 * 与其让每个按钮都失败一次，不如直接说清楚：先抓到真岗位再来。
+			 */
+			const demo = app.real !== true;
 			return h(
 				"div",
 				{ className: "bw_col bw_colMid" },
@@ -763,6 +773,16 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 								.filter((x) => x !== null && x !== undefined && x !== "")
 								.join("　·　"),
 						),
+						// 演示岗位：一句话说清"为什么点了没用"，而不是让每个按钮失败一次
+						// （类名刻意不用 bw_note：那会让"底栏常驻说明带"的位置断言认错元素）
+						demo
+							? h(
+									"div",
+									{ className: "bw_dSub bw_noteDanger" },
+									"这是演示数据（data/jobs.json 里还有 0 条真岗位），不能获取 JD、不能读会话、不能发送。" +
+										"先点右上角「抓取岗位」从 Boss 抓一批真的回来 —— 抓不到通常是本机 Chrome 没开 9222 调试口。",
+								)
+							: null,
 						h(
 							"div",
 							{ className: "bw_sect" },
@@ -793,7 +813,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 								h("span", { className: "bw_pickFile" }, h("span", null, "📄"), h("span", { className: "bw_pickName" }, resumeName ?? app.resume ?? "尚未选择")),
 								h("span", { className: "bw_pickNote" }, (resumeName ?? app.resume) ? "已就绪" : "待选"),
 								h("button", { type: "button", className: "bw_btn", onClick: () => onAct(app.id, "swapResume") }, "换"),
-								h("button", { type: "button", className: "bw_btn", disabled: !app.jd || assist?.running === true, onClick: () => onAct(app.id, "regenerate") }, assist?.running && assist?.action === "tailor" ? "微调中…" : "按 JD 微调"),
+								h("button", { type: "button", className: "bw_btn", disabled: demo || !app.jd || assist?.running === true, onClick: () => onAct(app.id, "regenerate") }, assist?.running && assist?.action === "tailor" ? "微调中…" : "按 JD 微调"),
 							),
 						),
 						assist?.tailored
@@ -823,10 +843,10 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 						h(
 							"div",
 							{ className: "bw_sect" },
-							h("div", { className: "bw_sectHead" }, h("span", null, "当前岗位会话与回复"), h("span", { className: "bw_spacer" }), h("button", { type: "button", className: "bw_btn", disabled: assist?.running === true, onClick: () => onConversation?.(app.id) }, assist?.running && assist?.action === "conversation" ? "读取中…" : "读取会话并生成建议")),
+							h("div", { className: "bw_sectHead" }, h("span", null, "当前岗位会话与回复"), h("span", { className: "bw_spacer" }), h("button", { type: "button", className: "bw_btn", disabled: demo || assist?.running === true, onClick: () => onConversation?.(app.id) }, assist?.running && assist?.action === "conversation" ? "读取中…" : "读取会话并生成建议")),
 							assist?.conversation?.messages?.length
 								? h("div", { className: "bw_jd" }, assist.conversation.messages.slice(-8).map((message) => `${message.direction === "incoming" ? "Boss" : "我"}：${message.text}`).join("\n"))
-								: h("div", { className: "bw_dSub" }, "不会自动读取；点击后才获取当前岗位会话。"),
+								: h("div", { className: "bw_dSub" }, demo ? "演示岗位没有会话，先抓真岗位。" : "不会自动读取；点击后才获取当前岗位会话。"),
 							...(assist?.reply?.drafts ?? []).map((draft, i) => h("div", { className: "bw_pick", key: "reply" + String(i) }, h("span", { className: "bw_pickNote" }, draft.style), h("span", { className: "bw_pickName" }, draft.text), h("button", { type: "button", className: "bw_btn", onClick: () => navigator.clipboard?.writeText(draft.text) }, "复制"))),
 							// ── 真正把回复发出去 ────────────────────────────────────
 							// 求职端没有发消息的 HTTP 接口，宿主走 MQTT（boss/mqtt-chat.mjs）。
@@ -872,8 +892,8 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 								{ className: "bw_sectHead" },
 								h("span", null, "打招呼语"),
 								h("span", { className: "bw_spacer" }),
-								h("button", { type: "button", className: "bw_btn", disabled: greet?.running === true, onClick: () => onGenerateGreeting?.(app.id) }, greet?.running === true ? "生成中…" : "生成话术"),
-								h("button", { type: "button", className: "bw_btn bw_btnPrimary", disabled: greet?.running === true || !app.securityId, onClick: () => onSendGreeting?.(app.id, greetText ?? app.greeting) }, "发送打招呼 ▸"),
+								h("button", { type: "button", className: "bw_btn", disabled: greet?.running === true || demo, onClick: () => onGenerateGreeting?.(app.id) }, greet?.running === true ? "生成中…" : "生成话术"),
+								h("button", { type: "button", className: "bw_btn bw_btnPrimary", disabled: greet?.running === true || demo || !app.securityId, onClick: () => onSendGreeting?.(app.id, greetText ?? app.greeting) }, "发送打招呼 ▸"),
 							),
 							// 受控 textarea：之前这里是 defaultValue 且没有 onChange，
 							// 用户改的字**永远进不了请求体**，发出去的永远是服务端默认招呼语。
@@ -1645,6 +1665,10 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 				if (body === "") return;
 				if (remote?.assistant?.sending === true) return;
 				const who = apps.find((a) => a.id === id);
+				if (who !== undefined && who.real !== true) {
+					setRemote((cur) => ({ ...(cur ?? {}), assistant: { ...(cur?.assistant ?? {}), jobId: id, sending: false, sendError: "这是演示岗位，没有对应会话，不能发送。" } }));
+					return;
+				}
 				// eslint-disable-next-line no-alert
 				if (typeof confirm === "function" && !confirm(`把这条消息发给「${who?.company ?? ""} ${who?.title ?? ""}」的 HR？\n\n${body}\n\n发出后无法撤回。`)) return;
 				setRemote((cur) => ({ ...(cur ?? {}), assistant: { ...(cur?.assistant ?? {}), jobId: id, sending: true, sendError: null, sent: null } }));
@@ -1660,6 +1684,11 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			/** 生成打招呼话术：纯函数在宿主跑，这条路不联网。 */
 			const generateGreeting = async (id) => {
 				if (remote?.greet?.running === true) return;
+				const target = apps.find((a) => a.id === id);
+				if (target !== undefined && target.real !== true) {
+					setRemote((cur) => ({ ...(cur ?? {}), greet: { running: false, jobId: id, ok: false, error: "这是演示岗位，不在岗位库里。先抓一批真岗位。" } }));
+					return;
+				}
 				setRemote((cur) => ({ ...(cur ?? {}), greet: { running: true, jobId: id, error: null } }));
 				const j = await postJson("/boss/greet/preview", { jobId: id, resumeName: selectedResume });
 				setRemote((cur) => ({
@@ -1673,6 +1702,12 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 				if (remote?.greet?.running === true) return;
 				const body = String(text ?? "").trim();
 				const who = apps.find((a) => a.id === id);
+				// 演示岗位不是真岗位：它的 id 不在 data/jobs.json 里，宿主只会回 404。
+				// 在第一层就拦住，别打一次注定失败的线上请求。
+				if (who !== undefined && who.real !== true) {
+					setRemote((cur) => ({ ...(cur ?? {}), greet: { running: false, jobId: id, ok: false, error: "这是演示岗位，不能发送。先点右上角「抓取岗位」抓一批真岗位。" } }));
+					return;
+				}
 				// 空话术不发：以前这里会把空串发出去，宿主再自己 buildGreeting 兜底，
 				// 结果"生成话术"如果失败（简历库还是空的），就是一次莫名其妙的线上请求。
 				if (body === "") {
