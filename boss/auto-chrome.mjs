@@ -89,27 +89,59 @@ export function findLaunchable({ running = {}, env = process.env, exists = exist
 }
 
 /**
- * 探测浏览器现在有没有在跑。用 tasklist / ps，不依赖任何外部包。
- * 探测失败时 `known: false`，调用方会当成"可能开着"处理（宁可用兜底 profile）。
+ * 探测浏览器现在有没有在跑。
+ *
+ * **不走 `tasklist`/`ps`**：在受限环境里 spawn 一个带管道的子进程会被挡掉
+ *（Node 在 Windows 上给管道开的是命名管道，沙箱直接 EPERM）。实测过
+ * `execFile` 和"重定向到文件"两种写法都一样，所以不能依赖这条路。
+ *
+ * 改用**profile 加锁**这个纯文件系统判据 —— 浏览器运行时会锁住 profile 目录下的
+ * `lockfile`（注意不是 `LOCK`，这个文件名我在本机确认过）：
+ *   - 能拿到写句柄 → 没在跑
+ *   - 拿不到（EPERM/EBUSY）→ 正在跑
+ * 本机实测：Chrome（27 进程）与 Edge（8 进程）的 lockfile 都是 EPERM，判据成立。
+ *
+ * @returns {Promise<{known: boolean, chrome: boolean|null, edge: boolean|null, chromium: boolean|null}>}
  */
-export function detectRunning({ platform = process.platform, execFileImpl = null } = {}) {
-	const execFile = execFileImpl ?? (async (file, args) => {
-		const { execFile: realExecFile } = await import("node:child_process");
-		return await new Promise((resolve, reject) => {
-			realExecFile(file, args, { windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => (err ? reject(err) : resolve({ stdout: String(stdout) })));
-		});
-	});
-	const classify = (lower) => ({
-		chrome: lower.includes("chrome.exe") || /google-chrome|chromium/u.test(lower),
-		edge: lower.includes("msedge.exe") || lower.includes("msedge") || lower.includes("microsoft-edge"),
-		chromium: /chromium/u.test(lower),
-	});
-	const run = platform === "win32"
-		? () => execFile("tasklist", ["/FO", "CSV", "/NH"]).then((out) => String(out?.stdout ?? "").toLowerCase())
-		: () => execFile("ps", ["-A", "-o", "comm="]).then((out) => String(out?.stdout ?? "").toLowerCase());
-	return run()
-		.then((lower) => ({ ...classify(lower), known: true }))
-		.catch(() => ({ known: false, chrome: null, edge: null, chromium: null }));
+export async function detectRunning({ platform = process.platform, env = process.env, browserCandidates: candidates = null } = {}) {
+	const { openSync, closeSync, existsSync: exists = existsSync } = await import("node:fs");
+	const { join: joinPath } = await import("node:path");
+	/**
+	 * 某个 profile 目录是不是"正在被使用"。
+	 * 拿不到写句柄 = 在跑；文件不存在 = 判不了（返回 null，让调用方按"在用"处理）。
+	 */
+	const inUse = (profileDir) => {
+		if (profileDir === null || profileDir === undefined || !exists(profileDir)) return null;
+		for (const name of ["lockfile", "LOCK"]) {
+			const lock = joinPath(profileDir, name);
+			if (!exists(lock)) continue;
+			let fd = null;
+			try {
+				fd = openSync(lock, "r+");
+				return false; // 拿到了 → 没在跑
+			} catch {
+				return true; // 拿不到 → 有人正开着
+			} finally {
+				if (fd !== null) { try { closeSync(fd); } catch { /* 忽略 */ } }
+			}
+		}
+		return null;
+	};
+	const list = candidates ?? browserCandidates({ env, exists, platform });
+	const result = { chrome: null, edge: null, chromium: null };
+	let anyKnown = false;
+	const seen = new Set();
+	for (const candidate of list) {
+		const key = candidate.name.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		const value = inUse(realProfileDir(candidate.name, { env, platform, exists }));
+		if (value === null) continue;
+		anyKnown = true;
+		// 同一个 name 可能有多个可执行文件路径，取"或"：任一个在用就算在用
+		result[key] = result[key] === true ? true : value;
+	}
+	return { ...result, known: anyKnown };
 }
 
 /** 拉起浏览器时的参数。单独导出便于测试断言。 */
@@ -145,16 +177,29 @@ export async function probeCdp(port = DEFAULT_PORT, { fetchImpl = null, timeoutM
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * 确保调试口可用：已就绪就直接用，否则依次试"能起得来"的浏览器。
+ * 确保调试口可用：已就绪就直接用，否则拉起一个带调试口的浏览器。
  *
- * 三轮，都是**看证据**推进，不靠猜：
- *   1. 优先没在运行的浏览器 + 它自己的 profile（能带上现成登录态）；
- *   2. 第一轮全失败 → 改用**插件自己的 profile**（任何在跑的实例都不会用它，所以一定能起）；
- *   3. 还不行 → 换一个端口再试（9222 可能被别的 devtools 占着）。
+ * ## 用哪个 user-data-dir（这一条最关键）
  *
- * 之所以要第 2 轮：进程探测在受限环境下可能失败（Node 的管道 stdio 会被沙箱挡，
- * 报 EPERM）。"探测不到"不能当成"没在跑"—— 那会去抢用户正在用的 profile。
- * 用插件自己的目录是安全的兜底，代价只是要重新登录一次。
+ * 一律用**插件自己的 profile**（`~/.dsh/boss-workbench/browser-profile`），理由三条：
+ *   1. 它**不是默认 profile**。Chrome 136+ 开始，远程调试在默认 profile 上被官方禁掉，
+ *      只有非默认 `--user-data-dir` 才有效 —— 这条正好绕开。
+ *   2. 它**不可能被用户在跑的实例占用**，所以不会撞上"单实例合并、参数被丢掉"。
+ *   3. 它里面已经有登录过 Boss 的痕迹（`session.json` 里 `stoken: present` 就是那一次写的），
+ *      冷启动后常常直接就是登录态 —— 用户连扫码都省了。
+ *
+ * 反过来说：**不去复用浏览器日常的那个 profile**。那是默认 profile，既可能被 Chrome
+ * 的策略挡住，也可能和用户正在用的实例抢锁；代价只是"可能要重新登录一次"，比出问题好。
+ *
+ * ## 关于"浏览器已经在跑"
+ *
+ * 加了 `--user-data-dir` 之后是一个**独立实例**，不会和用户正在跑的那个合并，
+ * DSH 所在的 Chrome 也完全不受影响。进程退出时留下的 profile 是新建的，不动用户的。
+ *
+ * ## 三轮尝试
+ *   1. 首选候选 + 插件 profile
+ *   2. 其余候选（Chrome/Edge/Chromium 各试一遍）
+ *   3. 换个端口再试（9222 可能被别的调试器占着）
  *
  * @param {{ port?: number, spawnImpl?: Function, fetchImpl?: Function, waitMs?: number, url?: string, userDataDir?: string, running?: object }} [options]
  */
@@ -174,47 +219,31 @@ export async function ensureDebuggableChrome({
 	if (!autoChromeEnabled()) return { ok: false, port, error: "自动拉起浏览器已被 BOSS_AUTO_CHROME=0 关掉", tried: [] };
 
 	const runningMap = running ?? await detectRunning();
-	const trusted = runningMap.known === false ? {} : runningMap;
-	const { all, free } = findLaunchable({ running: trusted });
+	const { all, free } = findLaunchable({ running: runningMap.known === false ? {} : runningMap });
 	const tried = all.map((c) => {
 		const key = c.name.toLowerCase();
-		return `${c.name} ${c.path}${runningMap.known === false ? "（进程探测不可用）" : trusted[key] === true ? "（正在运行）" : ""}`;
+		return `${c.name} ${c.path}${runningMap.known === false ? "（占用探测不可用）" : runningMap[key] === true ? "（正在运行）" : ""}`;
 	});
 	if (all.length === 0) {
 		return { ok: false, port, tried, error: "没找到 Chrome / Edge / Chromium 可执行文件；可用 BOSS_CHROME_PATH 指定 chrome.exe 的绝对路径。", candidates: all };
 	}
 
+	// 先试"当前没在跑"的候选（更干净），再试其余的；都用插件自己的 profile。
+	const ordered = [...free, ...all.filter((c) => !free.includes(c))];
 	const failures = [];
-	/** 记住成功的那个浏览器，下次优先它。 */
 	const remember = (candidate) => { try { writeJson(chromePathFile(), { path: candidate.path, name: candidate.name, at: new Date().toISOString() }); } catch { /* 记不住也没关系 */ } };
-	/** 进程探测完全不可用时，**不许**去碰真实 profile —— 宁可用插件自己的目录。 */
-	const probeUnreliable = runningMap.known === false;
-	if (!probeUnreliable) {
-		// ① 优先"没在运行"的候选，并复用它的 profile（登录态在里面）
-		for (const candidate of free) {
-			const profile = userDataDirFor(candidate, trusted, userDataDir);
-			const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port, userDataDir: profile, url: targetUrl, waitMs, fetchImpl });
-			if (attempt.ok) {
-				remember(candidate);
-				return { ok: true, launched: true, port, path: candidate.path, name: candidate.name, browser: attempt.browser, url: targetUrl, userDataDir: profile, reusedProfile: profile !== userDataDir };
-			}
-			failures.push(`${candidate.name}（${profile === userDataDir ? "插件 profile" : "浏览器 profile"}）：${attempt.error}`);
-		}
-	} else {
-		failures.push("进程探测不可用（Node 的管道 stdio 在受限环境会被挡）—— 跳过复用浏览器 profile，直接用插件自己的目录");
-	}
-	// ② 用插件自己的 profile 再试一遍。这个目录不可能被任何在跑的实例占用，所以最稳。
-	for (const candidate of all) {
+
+	for (const candidate of ordered) {
 		const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port, userDataDir, url: targetUrl, waitMs, fetchImpl });
 		if (attempt.ok) {
 			remember(candidate);
 			return { ok: true, launched: true, port, path: candidate.path, name: candidate.name, browser: attempt.browser, url: targetUrl, userDataDir, reusedProfile: false };
 		}
-		failures.push(`${candidate.name}（插件 profile）：${attempt.error}`);
+		failures.push(`${candidate.name}（端口 ${port}）：${attempt.error}`);
 	}
-	// ③ 换个端口 —— 9222 可能被别的调试器占着
+	// 换个端口 —— 9222 可能被别的调试器占着
 	const altPort = port === DEFAULT_PORT ? DEFAULT_PORT + 1 : DEFAULT_PORT;
-	for (const candidate of all) {
+	for (const candidate of ordered) {
 		const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port: altPort, userDataDir, url: targetUrl, waitMs, fetchImpl });
 		if (attempt.ok) {
 			remember(candidate);
@@ -231,10 +260,11 @@ export async function ensureDebuggableChrome({
 		candidates: all,
 		error:
 			"没能拉起任何可调试的浏览器。逐个试过的结果：\n  " + failures.join("\n  ") + "\n" +
-			"最常见的原因：浏览器已经在运行 —— 已在运行的浏览器**没法**被追加调试参数（单实例语义，参数会被丢掉）。\n" +
+			`用的 profile 是 ${userDataDir}（插件自己的目录，不是浏览器默认 profile）。\n` +
 			"可选的下一步：\n" +
-			"  · 完全退出其中一个浏览器（Chrome 或 Edge），再点下面的「帮我启动浏览器」；\n" +
-			"  · 或者按 README「启动真实 Chrome 会话」那节手动带 --remote-debugging-port=9222 启动。",
+			"  · 确认那个浏览器的窗口确实弹出来了（任务栏可能被最小化/藏到后台）；\n" +
+			"  · 或用 BOSS_CHROME_PATH 指定另一个浏览器可执行文件后重试；\n" +
+			"  · 或按 README「启动真实 Chrome 会话」那节手动带 --remote-debugging-port=9222 启动。",
 	};
 }
 

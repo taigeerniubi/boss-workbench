@@ -119,7 +119,11 @@ npm install
 
 ## 启动真实 Chrome 会话
 
-先彻底退出正在运行的 Chrome，再用一个固定的调试 profile 启动：
+**一般不用你手动做这件事。** 插件在进工作台时会自己检查调试口，没有就自己拉起一个
+带调试口的浏览器（用插件自己的 profile，不会和你日常那个窗口合并，**DSH 所在的
+Chrome 完全不受影响**）。失败了会在工作台里给一条说明带 + 一个「帮我启动浏览器」按钮。
+
+手动启动只作为兜底，或你想指定用哪个浏览器时：
 
 ```powershell
 & "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" `
@@ -128,18 +132,23 @@ npm install
   --user-data-dir="$env:LOCALAPPDATA\boss-workbench-chrome"
 ```
 
+`--user-data-dir` **不能省**：Chrome 136 起，远程调试在**默认 profile** 上被官方禁用，
+只有非默认目录才有效。
+
 如果 Chrome 安装在 `Program Files (x86)`，相应调整可执行文件路径。也可以设置：
 
 ```powershell
 $env:BOSS_CDP_URL = "http://127.0.0.1:9222"
+$env:BOSS_CHROME_PATH = "D:\somewhere\chrome.exe"   # 指定用哪个浏览器
+$env:BOSS_AUTO_CHROME = "0"                          # 完全不自动拉起
 ```
 
 安全限制：CDP 地址只允许 `localhost`、`127.0.0.1` 或 `::1`，防止把浏览器调试能力暴露给远端。
 
 然后：
 
-1. 在该 Chrome 中打开 `https://www.zhipin.com/web/geek/jobs`。
-2. 正常登录并完成人机验证。
+1. 在该浏览器中打开 `https://www.zhipin.com/web/geek/jobs`。
+2. 正常登录并完成人机验证（**登录态存在那个 profile 里，下次不用再登**）。
 3. 保持该 Boss 标签打开。
 4. 打开 DSH 的「Boss 工作台」，点击重新连接。
 

@@ -786,65 +786,43 @@ await check("没在监听时按参数拉起，并轮询到端口就绪；detache
 	assert.equal(result.browser, "Chrome/145");
 });
 
-await check("第一轮（复用浏览器 profile）失败 → 第二轮用插件自己的 profile，且换浏览器试", async () => {
+await check("一律用插件自己的 profile（非默认 profile 才绕得开 Chrome 136+ 的远程调试限制）", async () => {
 	const attempts = [];
 	let up = false;
-	const fetchImpl = async (url) => {
-		if (!up) throw new Error("ECONNREFUSED");
-		return { ok: true, json: async () => ({ Browser: "Edg/153" }) };
-	};
 	const result = await ensureDebuggableChrome({
 		port: 9222,
 		userDataDir: "C:\\plugin-profile",
 		waitMs: 1200,
-		fetchImpl,
-		running: { known: true, chrome: false, edge: false },
+		fetchImpl: async () => { if (!up) throw new Error("down"); return { ok: true, json: async () => ({ Browser: "Edg/153" }) }; },
+		running: { known: true, chrome: true, edge: true },
 		spawnImpl: (path, argv) => {
-			const dir = argv.find((a) => a.startsWith("--user-data-dir="));
-			attempts.push({ path, dir });
-			// 只有"插件自己的 profile + Edge"才成功 —— 模拟 Chrome 撞单实例
-			if (path.includes("msedge") && dir === "--user-data-dir=C:\\plugin-profile") setTimeout(() => { up = true; }, 200);
+			attempts.push({ path, dir: argv.find((a) => a.startsWith("--user-data-dir=")) });
+			if (path.includes("msedge")) setTimeout(() => { up = true; }, 200);
 			return { unref() {} };
 		},
 	});
 	assert.equal(result.ok, true, result.error);
 	assert.equal(result.name, "Edge", "Chrome 起不来就该换 Edge 再试");
-	assert.equal(result.reusedProfile, false, "第二轮用的是插件自己的 profile");
-	assert.ok(attempts.length >= 2, `应该试了多轮，实际 ${attempts.length} 次`);
-	assert.ok(new Set(attempts.map((a) => a.dir)).size >= 2, "两轮用的 profile 不同");
+	assert.equal(result.reusedProfile, false);
+	assert.ok(attempts.length >= 2, `应该把候选都试一遍，实际 ${attempts.length} 次`);
+	assert.ok(attempts.every((a) => a.dir === "--user-data-dir=C:\\plugin-profile"), `每次都该用插件 profile，实际：${attempts.map((a) => a.dir).join(", ")}`);
 });
 
-await check("探测不可用时不当成『没在跑』—— 第一轮仍会用插件自己的 profile 兜底", async () => {
-	const attempts = [];
-	let up = false;
+await check("全都起不来 → 报出每一轮的结果、用的 profile、可执行的下一步", async () => {
 	const result = await ensureDebuggableChrome({
-		port: 9222,
+		waitMs: 1000,
 		userDataDir: "C:\\plugin-profile",
-		waitMs: 1000,
-		fetchImpl: async () => { if (!up) throw new Error("down"); return { ok: true, json: async () => ({ Browser: "x" }) }; },
-		running: { known: false, chrome: null, edge: null },
-		spawnImpl: (path, argv) => {
-			attempts.push(argv.find((a) => a.startsWith("--user-data-dir=")));
-			setTimeout(() => { up = true; }, 150);
-			return { unref() {} };
-		},
-	});
-	assert.equal(result.ok, true, result.error);
-	assert.equal(result.reusedProfile, false, "探测不可用时不能去动用户真实 profile");
-	assert.ok(attempts.every((d) => d === "--user-data-dir=C:\\plugin-profile"), `不该碰真实 profile，实际：${attempts.join(", ")}`);
-});
-
-await check("全都起不来 → 报出每一轮的结果 + 可执行的下一步，而不是无限等", async () => {
-	const result = await ensureDebuggableChrome({
-		waitMs: 1000,
 		fetchImpl: async () => { throw new Error("ECONNREFUSED"); },
 		spawnImpl: () => ({ unref() {} }),
 		running: { known: true, chrome: true, edge: true },
 	});
 	assert.equal(result.ok, false);
-	assert.match(result.error, /单实例/u, "要点出最常见的原因");
-	assert.match(result.error, /完全退出/u, "要给出可执行的下一步");
 	assert.ok(Array.isArray(result.failures) && result.failures.length > 0, "要把每轮失败原因带出来");
+	assert.match(result.error, /C:\\plugin-profile/u, "要说明用的是哪个 profile");
+	assert.match(result.error, /BOSS_CHROME_PATH/u, "要给出可执行的下一步");
+	assert.match(result.error, /--remote-debugging-port=9222/u, "要给出最后的手动兜底命令");
+	// 这一版不再把"浏览器已在运行"当成必然原因 —— 加了 --user-data-dir 就是独立实例
+	assert.equal(/单实例/u.test(result.error), false, "不该再把单实例合并说成必然原因");
 });
 
 await check("BOSS_AUTO_CHROME=0 时绝不动手", async () => {
