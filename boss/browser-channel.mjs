@@ -50,6 +50,35 @@ export async function selectExistingBossSession(contexts) {
 }
 
 let cached = null;
+
+/**
+ * 已登录但一个 Boss 页面都没有 → 自己开一个职位页。
+ *
+ * 实测隐藏模式（`--headless=new`）的 Edge 会**忽略启动参数里的 URL**，起来只有一个
+ * about:blank（2026-09-18 线上就是这样：登录态在、页面没有，抓取报 BOSS_PAGE_NOT_FOUND）。
+ * 抓取全靠"让 Boss 自己的页面发请求"，所以这里补上这一页：优先复用 about:blank，
+ * 没有就新开。只在 requirePage 且 loggedIn 时做，每次连接最多一次，不会变成刷新风暴。
+ */
+async function openBossPage(context) {
+	const blank = (typeof context.pages === "function" ? context.pages() : []).find((p) => {
+		const u = p.url();
+		return u === "" || u === "about:blank";
+	});
+	const page = blank ?? await context.newPage();
+	await page.goto(`${SITE}/web/geek/jobs`, { waitUntil: "domcontentloaded", timeout: 45000 });
+	return page;
+}
+
+/** requirePage 时把缺的 Boss 页补上；补不上就照旧报 BOSS_PAGE_NOT_FOUND。 */
+async function ensureBossPage(picked, requirePage) {
+	if (!requirePage || picked.page !== null || !picked.loggedIn) return picked;
+	try {
+		return { ...picked, page: await openBossPage(picked.context), openedPage: true };
+	} catch (err) {
+		throw new BrowserSessionError("BOSS_PAGE_NOT_FOUND", `浏览器已登录 Boss，但没有打开 Boss 页面，自动打开职位页也失败了：${String(err?.message ?? err).split("\n")[0]}`);
+	}
+}
+
 /**
  * 自动拉起的**防抖闸门**。
  *
@@ -130,7 +159,8 @@ export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chr
 		autoLaunch = true;
 	}
 	if (cached?.browser?.isConnected?.()) {
-		const picked = await selectExistingBossSession(cached.browser.contexts());
+		let picked = await selectExistingBossSession(cached.browser.contexts());
+		if (picked !== null) picked = await ensureBossPage(picked, requirePage);
 		if (picked !== null && (!requirePage || picked.page !== null)) return { ...picked, browser: cached.browser, cdpUrl: safeUrl };
 	}
 	/** 自动拉起可能落在别的端口上（9222 被别的调试器占着），所以连接地址要跟着 boot 结果走。 */
@@ -177,8 +207,9 @@ export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chr
 		// 不复位的话插件会永远认为"已经试过了"，用户只能重启 GUI —— 这就是"搜不了了"。
 		autoLaunchAttemptedAt = 0;
 	});
-	const picked = await selectExistingBossSession(browser.contexts());
+	let picked = await selectExistingBossSession(browser.contexts());
 	if (picked === null) throw new BrowserSessionError("BROWSER_SESSION_NOT_FOUND", "浏览器里没有可复用的 Boss 页面或登录态");
+	picked = await ensureBossPage(picked, requirePage);
 	if (requirePage && picked.page === null) throw new BrowserSessionError("BOSS_PAGE_NOT_FOUND", "浏览器已登录 Boss，但没有打开 Boss 页面；请先打开职位页再重试");
 	return { ...picked, browser, cdpUrl: effectiveUrl };
 }

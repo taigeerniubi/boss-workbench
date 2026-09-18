@@ -208,6 +208,7 @@ window.__ModuleLoader__.load({
 .bw_rwOn .bw_rwHead{background:var(--dsw-alias-bg-module-platform,#f5f6f7)}
 .bw_rwName{font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .bw_rwCaret{flex:none;font-size:10px;color:var(--dsw-alias-label-tertiary)}
+.bw_libErr{margin:0 0 6px;padding:6px 8px;font-size:12px;border-radius:7px;color:var(--dsw-alias-state-error-primary,#ec1313);background:var(--dsw-alias-bg-module-platform,#f5f6f7)}
 .bw_rwX{flex:none;width:18px;height:18px;padding:0;font-size:13px;line-height:1;color:var(--dsw-alias-label-tertiary);background:transparent;border:0;border-radius:5px;cursor:pointer}
 .bw_rwX:hover{color:var(--dsw-alias-state-error-primary,#ec1313);background:var(--dsw-alias-interactive-bg-hover)}
 .bw_rwBody{padding:2px 9px 9px;border-top:1px solid var(--dsw-alias-border-l1)}
@@ -1370,6 +1371,8 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 								"PDF / Word(.docx) / Markdown，一次可以多份",
 							),
 							uploads.map((u, i) => h(UploadRow, { key: u.name + String(i), u })),
+							// 删除 / 重扫失败的原因必须看得见，否则就是"点了没反应"
+							state?.libError ? h("div", { className: "bw_libErr", role: "alert" }, state.libError) : null,
 							files.length === 0 ? h(Empty, null, "还没有简历") : files.map((f) => h(ResumeCard, {
 								key: f.name,
 								f,
@@ -1535,10 +1538,20 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			};
 
 			// ── 简历库：上传 / 删除 / 重扫（都打宿主的 /boss 路由）────────────────
+			/**
+			 * 失败**不能**吞成 null：之前 `.catch(() => null)` 让 401/404/500 和断网全变成"没反应"，
+			 * 用户点了删除什么都不发生、也没有任何提示。现在一律回 `{ ok: false, error }`。
+			 */
 			const postJson = (path, body) =>
 				fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) })
-					.then((r) => r.json())
-					.catch(() => null);
+					.then(async (r) => {
+						const text = await r.text();
+						let json = null;
+						try { json = JSON.parse(text); } catch { /* 非 JSON（401 unauthorized / 404 文本）走下面 */ }
+						if (json !== null && typeof json === "object") return json;
+						return { ok: false, error: "HTTP " + String(r.status) + (text ? "：" + text.slice(0, 120) : "") };
+					})
+					.catch((err) => ({ ok: false, error: "请求失败：" + String(err?.message ?? err) }));
 
 			/**
 			 * 传一份。用 XHR 才有真实的上传字节进度（fetch 拿不到）；
@@ -1590,14 +1603,18 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 
 			const rescanResumes = async () => {
 				const j = await postJson("/boss/resumes/rescan");
-				if (j?.ok === true) setRemote((cur) => ({ ...(cur ?? {}), ok: true, resumes: j.index }));
+				if (j?.ok === true) setRemote((cur) => ({ ...(cur ?? {}), ok: true, resumes: j.index, libError: null }));
+				else setRemote((cur) => ({ ...(cur ?? {}), libError: "重扫失败：" + String(j?.error ?? "宿主没有返回结果") }));
 			};
 			const deleteResume = async (name) => {
 				const j = await postJson("/boss/resumes/delete", { name });
 				if (j?.ok === true) {
-					setRemote((cur) => ({ ...(cur ?? {}), ok: true, resumes: j.index }));
+					// removed=false 说明磁盘上已经没有这个文件（索引过期）；索引已按目录重建，界面跟着刷新即可
+					setRemote((cur) => ({ ...(cur ?? {}), ok: true, resumes: j.index, libError: null }));
 					if (selectedResume === name) setSelectedResume(null);
+					return;
 				}
+				setRemote((cur) => ({ ...(cur ?? {}), libError: "删除「" + name + "」失败：" + String(j?.error ?? "宿主没有返回结果") }));
 			};
 
 			// ── 抓岗位：输入框里的关键词，回车就真去 Boss 搜 ────────────────────
