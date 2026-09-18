@@ -85,8 +85,8 @@ export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chr
 			throw new BrowserSessionError(
 				"CDP_UNAVAILABLE",
 				`没有找到可复用的浏览器调试会话（${safeUrl}）。` +
-					`如果本机浏览器已经在跑，它没法被追加调试参数 —— 完全退出其中一个（Chrome 或 Edge）后点「帮我启动浏览器」，` +
-					`或按 README「启动真实 Chrome 会话」那节手动带 --remote-debugging-port=9222 启动。`,
+					`插件会在打开工作台时自己拉起一个带调试口的浏览器；如果一直不成功，` +
+					`可以用 BOSS_CHROME_PATH 指定浏览器，或按 README「启动真实 Chrome 会话」那节手动启动。`,
 			);
 		}
 		try {

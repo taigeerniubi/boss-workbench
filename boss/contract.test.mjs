@@ -35,6 +35,7 @@ import {
 import {
 	browserCandidates, buildLaunchArgs, ensureDebuggableChrome, findLaunchable, probeCdp, realProfileDir, userDataDirFor,
 } from "./auto-chrome.mjs";
+import { navigateOnce, readNavLog, resetNavLogForTests } from "./loginflow.mjs";
 let pass = 0;
 const fail = [];
 async function check(name, fn) {
@@ -719,7 +720,7 @@ await check("候选浏览器：只在装了的里面挑；把试过哪些带出�
 	assert.ok(all.some((c) => c.name === "Chrome"), "Chrome 要在候选里");
 	// 只有真的装了 Edge 才断言 —— 不能因为测试机没装就判失败
 	if (all.some((c) => c.name === "Edge")) assert.ok(all.some((c) => c.name === "Edge"), "装了 Edge 就必须把它算进候选（Chrome 正开着时它是活路）");
-	assert.deepEqual(browserCandidates({ env: {}, exists: () => false, platform: "win32" }), [], "一个都没有时返回空数组");
+	assert.deepEqual(browserCandidates({ env: { ProgramFiles: "C:\\PF", "ProgramFiles(x86)": "C:\\PF86", LOCALAPPDATA: "C:\\LA" }, exists: () => false, platform: "win32" }), [], "一个都没有时返回空数组");
 	const mac = browserCandidates({ env: {}, exists: (p) => p.includes("Google Chrome.app"), platform: "darwin" });
 	assert.match(String(mac[0]?.path), /Google Chrome\.app/u, "macOS 路径也要覆盖");
 	const linux = browserCandidates({ env: {}, exists: (p) => p === "/usr/bin/chromium", platform: "linux" });
@@ -797,12 +798,13 @@ await check("一律用插件自己的 profile（非默认 profile 才绕得开 C
 		running: { known: true, chrome: true, edge: true },
 		spawnImpl: (path, argv) => {
 			attempts.push({ path, dir: argv.find((a) => a.startsWith("--user-data-dir=")) });
+			// 只有 Edge 成功 —— 模拟"首选候选起不来、换下一个候选"
 			if (path.includes("msedge")) setTimeout(() => { up = true; }, 200);
 			return { unref() {} };
 		},
 	});
 	assert.equal(result.ok, true, result.error);
-	assert.equal(result.name, "Edge", "Chrome 起不来就该换 Edge 再试");
+	assert.equal(result.name, "Edge", "首选候选起不来就该换下一个候选");
 	assert.equal(result.reusedProfile, false);
 	assert.ok(attempts.length >= 2, `应该把候选都试一遍，实际 ${attempts.length} 次`);
 	assert.ok(attempts.every((a) => a.dir === "--user-data-dir=C:\\plugin-profile"), `每次都该用插件 profile，实际：${attempts.map((a) => a.dir).join(", ")}`);
@@ -863,6 +865,112 @@ await check("静态护栏：这个模块里没有任何杀进程/结束用户的
 	for (const banned of ["taskkill", "pkill", "killall", "Stop-Process", ".kill("]) {
 		assert.equal(source.includes(banned), false, `不该出现 ${banned}`);
 	}
+});
+//#endregion
+
+//#region 10. 导航护栏：插件绝不能把用户的页面刷成风暴
+section("10. 页面刷新护栏：同一目标不重复导航，已到位就不碰");
+
+/** 造一个假 page，记录 goto 次数与地址变化。 */
+function fakePage(url = "about:blank") {
+	const state = { url, gotos: [] };
+	return {
+		state,
+		url: () => state.url,
+		isClosed: () => false,
+		async goto(target) {
+			state.gotos.push(target);
+			state.url = target;
+		},
+	};
+}
+
+await check("已经在合适页面上 → 一次都不导航", async () => {
+	resetNavLogForTests();
+	// 用户在职位页，目标是登录页：alreadyThere 说"这个地址已经够用"，就不该动它
+	const page = fakePage("https://www.zhipin.com/web/geek/jobs");
+	const nav = await navigateOnce(page, "https://www.zhipin.com/web/user/?ka=header-login", {
+		alreadyThere: (url) => url.startsWith("https://www.zhipin.com") && /\/web\/geek\//u.test(url),
+	});
+	assert.equal(nav.navigated, false);
+	assert.equal(page.state.gotos.length, 0, "已经在合适页面上就不能动它");
+	assert.equal(nav.skipped, true);
+});
+
+await check("同一目标 60 秒内只导航一次（这是刷新风暴的根源）", async () => {
+	resetNavLogForTests();
+	const page = fakePage("about:blank");
+	const first = await navigateOnce(page, "https://www.zhipin.com/web/user/");
+	assert.equal(first.navigated, true);
+	assert.equal(page.state.gotos.length, 1);
+
+	// 再调一次：地址已经是目标，会被"已在目标地址"挡住
+	const second = await navigateOnce(page, "https://www.zhipin.com/web/user/");
+	assert.equal(second.navigated, false);
+	assert.equal(page.state.gotos.length, 1, "第二次绝不能再 goto");
+
+	// 页面被别的原因弄回 about:blank 后又调一次 —— 冷却期内也要挡住
+	page.state.url = "about:blank";
+	const third = await navigateOnce(page, "https://www.zhipin.com/web/user/");
+	assert.equal(third.navigated, false);
+	assert.equal(third.throttled, true, "冷却期内应该走 throttled 而不是再导航一次");
+	assert.equal(page.state.gotos.length, 1, "反复调用也只允许一次导航");
+
+	// 连打 20 次，仍然只有一次
+	for (let i = 0; i < 20; i++) {
+		page.state.url = "about:blank";
+		await navigateOnce(page, "https://www.zhipin.com/web/user/");
+	}
+	assert.equal(page.state.gotos.length, 1, `20 次调用只该有 1 次导航，实际 ${page.state.gotos.length}`);
+});
+
+await check("alreadyThere 判定为真时也不导航（用户在职位页就不顶掉他的页面）", async () => {
+	resetNavLogForTests();
+	const page = fakePage("https://www.zhipin.com/web/geek/jobs");
+	const nav = await navigateOnce(page, "https://www.zhipin.com/web/user/?ka=header-login", {
+		alreadyThere: (url) => url.startsWith("https://www.zhipin.com") && /\/web\/geek\//u.test(url),
+	});
+	assert.equal(nav.navigated, false);
+	assert.equal(page.state.gotos.length, 0);
+	assert.equal(nav.skipped, true);
+});
+
+await check("真的不在合适页面时才导航一次", async () => {
+	resetNavLogForTests();
+	const page = fakePage("about:blank");
+	const nav = await navigateOnce(page, "https://www.zhipin.com/web/user/?ka=header-login", {
+		alreadyThere: (url) => /\/web\/geek\//u.test(url),
+	});
+	assert.equal(nav.navigated, true);
+	assert.equal(page.state.gotos.length, 1);
+	assert.equal(page.state.url, "https://www.zhipin.com/web/user/?ka=header-login");
+});
+
+await check("导航失败不抛异常、也不把登录流程判死，但会记一条", async () => {
+	resetNavLogForTests();
+	const page = { url: () => "about:blank", isClosed: () => false, async goto() { throw new Error("net::ERR_ABORTED"); } };
+	const nav = await navigateOnce(page, "https://www.zhipin.com/web/user/");
+	assert.equal(nav.navigated, false);
+	assert.match(String(nav.error), /ERR_ABORTED/u);
+	assert.equal(readNavLog().some((e) => e.action === "goto-failed"), true, "失败也要留痕");
+});
+
+await check("导航日志能回答『到底谁在刷新页面』", async () => {
+	resetNavLogForTests();
+	const page = fakePage("about:blank");
+	await navigateOnce(page, "https://www.zhipin.com/web/user/");
+	await navigateOnce(page, "https://www.zhipin.com/web/user/");
+	const log = readNavLog();
+	assert.ok(log.length >= 2);
+	assert.equal(log.some((e) => e.action === "goto"), true, "有过一次真实导航");
+	assert.equal(log.some((e) => e.action === "skip"), true, "也有被挡下的调用");
+	for (const entry of log) assert.equal(typeof entry.at, "string", "每条都要有时间戳");
+});
+
+await check("静态护栏：loginflow 里不许有绕过冷却的裸 page.goto", async () => {
+	const source = await import("node:fs").then((fs) => fs.readFileSync(new URL("./loginflow.mjs", import.meta.url), "utf8"));
+	const bare = source.split("\n").filter((line) => /\.goto\(/u.test(line) && !/navigateOnce|page\.goto\(target/u.test(line));
+	assert.deepEqual(bare, [], `loginflow.mjs 里不该有裸 page.goto：${bare.join(" | ")}`);
 });
 //#endregion
 

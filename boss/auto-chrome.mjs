@@ -54,9 +54,11 @@ export function browserCandidates({ env = process.env, exists = existsSync, plat
 		push("Chrome", join(pf, "Google\\Chrome\\Application\\chrome.exe"), PROFILE_DIR);
 		push("Chrome", join(pf86, "Google\\Chrome\\Application\\chrome.exe"), PROFILE_DIR);
 		push("Chrome", join(local, "Google\\Chrome\\Application\\chrome.exe"), PROFILE_DIR);
-		// Edge 放前面在"Chrome 正开着、Edge 没开"时会更实用 —— 排序在 findLaunchable 里做
+		// Edge 的两个 Program Files 都要试（本机 Chrome 在 PF、Edge 在 PF86，
+		// 少写一个就会把主浏览器整个漏掉）
 		push("Edge", join(pf86, "Microsoft\\Edge\\Application\\msedge.exe"), PROFILE_DIR);
 		push("Edge", join(pf, "Microsoft\\Edge\\Application\\msedge.exe"), PROFILE_DIR);
+		push("Edge", join(local, "Microsoft\\Edge\\Application\\msedge.exe"), PROFILE_DIR);
 	} else if (platform === "darwin") {
 		push("Chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", PROFILE_DIR);
 		push("Edge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", PROFILE_DIR);

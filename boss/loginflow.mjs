@@ -24,6 +24,65 @@ let flow = {
 let stateCache = { at: 0, value: null };
 const STATE_TTL_MS = 15 * 1000;
 
+/**
+ * 导航护栏 + 导航日志。
+ *
+ * 为什么需要：用户报过一次"页面一直刷新"。界面上看到的现象是 Boss 页不停重载，
+ * 而插件里能触发导航的只有两处（这里和 verifyOnce）—— 只要有一处在循环里被反复
+ * 打到，用户看到的就是刷新风暴。所以：
+ *   1. **同一页同一目标地址，60 秒内只导航一次**（除非显式 force）；
+ *   2. 每次导航都记一条日志，`/boss/login/state` 会把它带出来 ——
+ *      如果页面还在刷新而这份日志是空的，那刷新就不是插件干的（比如站内自己重载）。
+ *
+ * 这是"先保证不是自己干的，再看是谁干的"，而不是靠猜。
+ */
+const NAV_COOLDOWN_MS = 60 * 1000;
+const navLog = [];
+const lastNav = new Map();
+const noteNav = (entry) => {
+	navLog.push({ at: new Date().toISOString(), ...entry });
+	if (navLog.length > 30) navLog.shift();
+};
+export const readNavLog = () => navLog.slice();
+export function resetNavLogForTests() {
+	navLog.length = 0;
+	lastNav.clear();
+}
+
+/**
+ * 把某个 page 导航到目标地址，但**同一目标在冷却期内只做一次**。
+ *
+ * `alreadyThere(current)` 决定"当前这个地址算不算已经到位"：
+ *   - 已经在目标路径上 → 直接跳过（最常见）；
+ *   - 已经在这个站点的**合适页面**上（比如用户在职位页）→ 也不动它，
+ *     免得把用户正在看的页面顶掉。
+ * 只有真的不在合适页面时，才导航一次；同一目标 60 秒内不重复。
+ */
+export async function navigateOnce(page, target, { force = false, timeout = 45000, alreadyThere = null } = {}) {
+	const current = String(page.url?.() ?? "");
+	const inPlace = current.startsWith(target) || (typeof alreadyThere === "function" && alreadyThere(current));
+	if (inPlace) {
+		noteNav({ action: "skip", target, current, why: current.startsWith(target) ? "已经在目标地址" : "已经在合适页面" });
+		return { navigated: false, current, skipped: true };
+	}
+	const previous = lastNav.get(target) ?? 0;
+	if (!force && Date.now() - previous < NAV_COOLDOWN_MS) {
+		noteNav({ action: "throttled", target, current, msSince: Date.now() - previous });
+		return { navigated: false, current, throttled: true };
+	}
+	lastNav.set(target, Date.now());
+	noteNav({ action: "goto", target, current });
+	try {
+		await page.goto(target, { waitUntil: "domcontentloaded", timeout });
+	} catch (err) {
+		// 导航失败不该把整条登录流程判死：页面可能只是慢，或者用户手快点了别处。
+		// 记下来，让上层能看见原因，但调用方自己决定要不要降级。
+		noteNav({ action: "goto-failed", target, error: String(err?.message ?? err) });
+		return { navigated: false, current, error: String(err?.message ?? err) };
+	}
+	return { navigated: true, current: String(page.url?.() ?? "") };
+}
+
 const snapshot = () => ({
 	phase: flow.phase,
 	startedAt: flow.startedAt === 0 ? null : new Date(flow.startedAt).toISOString(),
@@ -61,7 +120,7 @@ async function verifyOnce() {
 			page = await flow.context.newPage();
 			flow.page = page;
 			flow.ownedPage = true;
-			await page.goto(`${SITE}/web/geek/jobs`, { waitUntil: "domcontentloaded", timeout: 45000 });
+			await navigateOnce(page, `${SITE}/web/geek/jobs`);
 		}
 		const response = await browserJson(page, "/wapi/zpuser/wap/getUserInfo.json", {}, { referer: `${SITE}/web/geek/jobs` });
 		const state = classifyBossResponse(response.json, response);
@@ -106,10 +165,13 @@ export async function startLogin({ force = false, autoLaunch = true } = {}) {
 			flow.page = await linked.context.newPage();
 			flow.ownedPage = true;
 		}
-		if (!String(flow.page.url()).startsWith(SITE)) {
-			await flow.page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
-		}
-		return { ok: true, resumed: false, ...setPhase("waiting-browser", { detail: "请在刚打开的 Chrome 标签里扫码并完成手机验证" }) };
+		// 用带冷却的导航：已经在合适页面上就不碰它（用户可能正看着那一页），
+		// 同一目标 60 秒内也不重复导航 —— 页面刷新风暴就是这么来的。
+		const nav = await navigateOnce(flow.page, LOGIN_URL, {
+			// 已经登录着、或在职位/聊天页上，就算到位，不要去顶掉用户的页面
+			alreadyThere: (url) => url.startsWith(SITE) && /\/web\/geek\//u.test(url),
+		});
+		return { ok: true, resumed: false, ...setPhase("waiting-browser", { detail: nav.navigated ? "已在浏览器里打开 Boss 登录页，请扫码并完成手机验证" : "请在浏览器里完成 Boss 登录", nav }) };
 	} catch (err) {
 		return { ok: false, ...setPhase("failed", { error: `打开 Boss 登录页失败：${String(err?.message ?? err)}`, detail: null }) };
 	}

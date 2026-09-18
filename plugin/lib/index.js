@@ -24,7 +24,7 @@ import { existingBrowserStatus } from "../../boss/browser-channel.mjs";
 import { fetchJobDetail } from "../../boss/detail.mjs";
 import { DATA_DIR, FILTER_SPECS, RESUMES_DIR, loadCities, loadProfile, loadSession, readCooldown, readJson, writeJson } from "../../boss/lib.mjs";
 import { fetchBalance } from "../../boss/balance.mjs";
-import { loginState, logout, pollLogin, startLogin } from "../../boss/loginflow.mjs";
+import { loginState, logout, pollLogin, readNavLog, startLogin } from "../../boss/loginflow.mjs";
 import { buildGreeting, sendGreeting } from "../../boss/greet.mjs";
 import { buildIndex, readIndex, removeResume, saveUpload } from "../../boss/resumes.mjs";
 import { runScrape } from "../../boss/jobs.mjs";
@@ -259,12 +259,14 @@ async function handle(ctx, req, res) {
 	}
 
 	// ── 登录：没登录就让工作台先把二维码弹出来 ──────────────────────────────
+	// navLog 是"到底谁在刷新页面"的证据：插件每次导航都会记一条。
+	// 如果页面还在刷新而这份日志是空的，那就不是插件干的。
 	if (method === "GET" && path === "/login/state") {
-		return sendJson(res, 200, { ok: true, ...(await loginState({ force: url.searchParams.get("force") === "1" })) });
+		return sendJson(res, 200, { ok: true, ...(await loginState({ force: url.searchParams.get("force") === "1" })), navLog: readNavLog() });
 	}
 	if (method === "POST" && path === "/login/start") {
 		const r = await startLogin({ force: url.searchParams.get("force") === "1" });
-		return sendJson(res, r.ok ? 200 : 502, r);
+		return sendJson(res, r.ok ? 200 : 502, { ...r, navLog: readNavLog() });
 	}
 	if (method === "GET" && path === "/login/status") {
 		return sendJson(res, 200, { ok: true, ...(await pollLogin()) });
