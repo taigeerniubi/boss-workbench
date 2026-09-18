@@ -1,7 +1,7 @@
 /**
- * 抓岗位 → data/jobs.json（纯 HTTP，不开浏览器）
+ * 抓岗位 → data/jobs.json（复用用户现有 Chrome/Boss 页面）
  *
- * 浏览器只在登录那一步出场（换 __zp_stoken__），抓取完全走 wapi JSON。
+ * 不启动独立浏览器，不做 Node 直连；请求由已打开的 Boss 页面同源发出。
  * 真正干活的逻辑在 jobs.mjs 的 runScrape() —— 工作台上的「抓取」按钮走的是同一个函数。
  * 两种模式：
  *   --mode search    关键词 + 城市搜索（默认）→ /wapi/zpgeek/search/joblist.json
@@ -12,19 +12,19 @@
  *   node boss/scrape.mjs --mode recommend --experience 三到五年 --salary 20-50k --yes
  *
  * 三个硬约束（账号比数据重要）：
- *   1. code 35（IP 异常）立刻停，不重试、不换姿势硬撞；
- *   2. 页间随机延时 3~8s，默认只抓 3 页；
+ *   1. code 35/36/37/403 立刻停，不重试、不换通道；
+ *   2. 页间随机延时 5~9s，默认只抓 1 页；
  *   3. 不加 --yes 只打印计划，完全不碰网络。
  */
 import { join } from "node:path";
-import { DATA_DIR, filterJobs, loadProfile, loadSession, loginStateHttp, readJson, resolveCity } from "./lib.mjs";
+import { DATA_DIR, filterJobs, loadProfile, readJson, resolveCity } from "./lib.mjs";
 // 真正干活的逻辑在 jobs.mjs —— 宿主路由 /boss/scrape 走的是同一个函数，
 // 这样"终端里能抓到的"和"工作台上能抓到的"永远是一回事。
 import { runScrape } from "./jobs.mjs";
 
 function parseArgs(argv) {
 	const out = {
-		mode: "search", pages: 3, pageSize: 30, minDelay: 3000, maxDelay: 8000, yes: false,
+		mode: "search", pages: 1, pageSize: 30, minDelay: 5000, maxDelay: 9000, yes: false,
 		city: null, query: null, maxKm: null, experience: null, jobType: null, salary: null,
 	};
 	for (let i = 0; i < argv.length; i++) {
@@ -42,8 +42,6 @@ function parseArgs(argv) {
 		else if (a === "--min-delay") out.minDelay = Number(next());
 		else if (a === "--max-delay") out.maxDelay = Number(next());
 		else if (a === "--yes") out.yes = true;
-		else if (a === "--browser") out.browser = true;
-		else if (a === "--ignore-cooldown") out.ignoreCooldown = true;
 		else if (a === "--help" || a === "-h") out.help = true;
 	}
 	return out;
@@ -51,7 +49,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 if (args.help) {
-	console.log(`抓岗位 → data/jobs.json（纯 HTTP）
+	console.log(`抓岗位 → data/jobs.json（复用现有 Chrome）
 
   --mode search|recommend   默认 search（关键词 + 城市）；recommend 是参考项目实测可用的推荐流
   --city <名字>             城市（默认取 data/profile.json 的 homeCity）
@@ -60,32 +58,27 @@ if (args.help) {
   --job-type <全职|兼职>
   --salary <3k以下|3-5k|5-10k|10-20k|20-50k|50以上>
   --pages <n> --page-size <n> --max-km <n> --min-delay <ms> --max-delay <ms>
-  --browser                 撞 code 37 时改用浏览器兜底（默认不开：那会再打一次 Boss）
-  --ignore-cooldown         忽略冷却期，强行执行（撞过风控后会锁上，见下）
   --yes                     真正执行（不加只打印计划）
 
-  冷却期：见过 code 35（IP/账号异常）或 37（签名挑战）之后，本工具会自己锁一段时间，
-  期间直接拒绝执行 —— 风控按频率扣分，"再试一次"只会更糟。锁的状态在
-  data/cooldown.json，要提前解锁就用 --ignore-cooldown。
+  前置条件：用 --remote-debugging-port=9222 启动 Chrome，并在同一个 Chrome 里打开、
+  登录 Boss。冷却期不能从 CLI 强行绕过，避免排障时反复撞风控。
 `);
 	process.exit(0);
 }
 
 const profile = loadProfile();
-const session = loadSession();
 const city = args.city ?? profile.homeCity;
 const query = args.query ?? profile.keywords?.[0] ?? "";
 const maxKm = args.maxKm ?? null;
 const cityCode = resolveCity(city);
 
 console.log(`抓取计划（${args.mode}）`);
-console.log(`  会话   : ${session === null ? "⚠ data/session.json 不存在 —— 先跑 node boss/login.mjs" : `已保存于 ${session.savedAt ?? "?"}`}`);
+console.log("  会话   : 复用 http://127.0.0.1:9222 中已打开的 Boss 页面");
 console.log(`  城市   : ${city}${cityCode === null ? "  ⚠ 没有城市码（先登录以缓存城市表，或改用内置的 北京/上海）" : ` (${cityCode})`}`);
 if (args.mode === "search") console.log(`  关键词 : ${query || "(空)"}`);
 else console.log(`  筛选项 : 经验=${args.experience ?? "不限"} 类型=${args.jobType ?? "不限"} 薪资=${args.salary ?? "不限"}`);
 console.log(`  页数   : ${args.pages} × ${args.pageSize} 条，页间延时 ${args.minDelay}~${args.maxDelay}ms`);
 console.log(`  距离   : ${maxKm === null ? "不限" : `≤ ${maxKm}km`}${profile.homeGeo === null && readJson(join(DATA_DIR, "geo.json"), null) === null ? "  ⚠ 没有坐标来源，距离多半是「距离未知」（见下）" : ""}`);
-if (session === null) process.exit(1);
 if (args.mode === "search" && cityCode === null) process.exit(2);
 if (!args.yes) {
 	console.log("\n(未加 --yes，只打印计划。确认后再跑。)");
@@ -104,8 +97,6 @@ const result = await runScrape({
 	experience: args.experience,
 	jobType: args.jobType,
 	salary: args.salary,
-	browserFallback: args.browser === true,
-	ignoreCooldown: args.ignoreCooldown === true,
 	log: (line) => console.log(`  ${line}`),
 });
 
@@ -132,8 +123,3 @@ if (near.length > 0) {
 	console.log(`      { "海淀区·中关村": { "lng": 116.31, "lat": 39.98 } }`);
 	console.log("    配合 data/profile.json 的 homeGeo，即可按 Haversine 算；没有的商圈显示「距离未知」。");
 }
-
-// 顺手把登录态也报一下，方便判断是"抓完了"还是"被抓了"
-const state = await loginStateHttp(session);
-if (state.flagged) console.log("\n⚠ 结束时登录态检查发现 code 35 —— 短期内别再抓。");
-if (state.loggedIn === false) console.log("\n⚠ 登录态检查说 isLogin=false —— cookie 已经不作数了，重新登录。");

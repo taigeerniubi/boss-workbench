@@ -1,212 +1,144 @@
 /**
- * 扫码登录的**状态机**，宿主路由与命令行共用一份实现。
+ * 登录绑定状态机：连接用户已经启动的 Chrome 调试会话，复用真实浏览器上下文。
  *
- * 为什么要有这个模块：登录不是一次请求，是五步 + 一个浏览器步骤，
- * 而 UI 需要"扫到没有"的中间态。把它做成有状态的流程，UI 每 2 秒问一次就行。
- *
- *   ① POST /wapi/zppassport/captcha/randkey                   → qrId
- *   ② GET  /wapi/zpweixin/qrcode/getqrcode?content=<qrId>     → 二维码 PNG
- *   ③ GET  /wapi/zppassport/qrcode/scan?uuid=<qrId>           → scaned?
- *   ④ GET  /wapi/zppassport/qrcode/scanLogin?qrId=&status=1    → code 0?
- *   ⑤ GET  /wapi/zppassport/qrcode/dispatcher?…&fp=<本地生成>  → Set-Cookie
- *   ⑥ 无头浏览器打开 security-check 页 → __zp_stoken__ 自动写入
- *
- * phase: idle → waiting-scan → waiting-confirm → finalizing → logged-in
- *        另有 flagged（code 35）/ expired / failed 三种终止态。
+ * 不再由 Node 申请二维码、伪造 fp 或启动独立无头 profile。用户在真实 Chrome 的
+ * Boss 页面里扫码/验证；这里平时只读 cookie，检测到 wt2 后才发一次 userInfo 校验。
  */
-import { completeSecurityCheck, generateFp, httpApi, isFlagged, loginStateHttp, parseCookieJar, saveSession } from "./lib.mjs";
+import {
+	BrowserSessionError,
+	browserJson,
+	classifyBossResponse,
+	connectExistingBossBrowser,
+	existingBrowserStatus,
+} from "./browser-channel.mjs";
+import { SITE, clearSession, effectiveCookieHeader, markCooldown, parseCookieJar, saveSession } from "./lib.mjs";
 
-const EXPIRE_MS = 3 * 60 * 1000;
-const FINALIZE_TIMEOUT_MS = 60 * 1000;
+const LOGIN_URL = `${SITE}/web/user/?ka=header-login`;
+const EXPIRE_MS = 10 * 60 * 1000;
 
-/** 当前这一次登录尝试。同一时间只允许一个 —— 二维码是单例的。 */
-let flow = { phase: "idle", qrId: null, cookie: "", bst: "", startedAt: 0, error: null, finalizing: false, detail: null };
-
-/** 登录态检查的短缓存，避免页面每次挂载都打一次 Boss。 */
+let flow = {
+	phase: "idle", startedAt: 0, error: null, detail: null,
+	context: null, page: null, ownedPage: false, finalizing: false, account: null,
+};
 let stateCache = { at: 0, value: null };
-const STATE_TTL_MS = 30 * 1000;
+const STATE_TTL_MS = 15 * 1000;
 
+const snapshot = () => ({
+	phase: flow.phase,
+	startedAt: flow.startedAt === 0 ? null : new Date(flow.startedAt).toISOString(),
+	error: flow.error,
+	detail: flow.detail,
+	account: flow.account,
+});
 const setPhase = (phase, extra = {}) => {
 	flow = { ...flow, phase, ...extra };
 	return snapshot();
 };
-const snapshot = () => ({
-	phase: flow.phase,
-	qrId: flow.qrId,
-	startedAt: flow.startedAt === 0 ? null : new Date(flow.startedAt).toISOString(),
-	error: flow.error,
-	// 细粒度进度（"等 __zp_stoken__… 已 3s" 这种）。安全验证那一步要开浏览器，
-	// 只给一个转圈图标的话用户不知道是在跑还是卡死了 —— 这就是"半天没反应"的观感来源。
-	detail: flow.detail,
-});
 
-/** 把响应里的 Set-Cookie 合并进这次流程的 cookie 串。 */
-function absorb(res) {
-	const list = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
-	const pairs = [];
-	for (const raw of list) {
-		const first = raw.split(";")[0].trim();
-		if (first.includes("=")) pairs.push(first);
+const riskCooldown = (kind, message) => {
+	if (["ip-risk", "account-risk", "environment-risk", "browser-blocked", "rate-limited"].includes(kind)) {
+		markCooldown({ kind, message });
 	}
-	if (pairs.length === 0) return {};
-	const jar = new Map(
-		flow.cookie
-			.split("; ")
-			.filter((p) => p.includes("="))
-			.map((p) => {
-				const i = p.indexOf("=");
-				return [p.slice(0, i), p.slice(i + 1)];
-			}),
-	);
-	const changed = {};
-	for (const pair of pairs) {
-		const i = pair.indexOf("=");
-		jar.set(pair.slice(0, i), pair.slice(i + 1));
-		changed[pair.slice(0, i)] = pair.slice(i + 1);
-	}
-	flow.cookie = [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
-	return changed;
-}
-
-/** ① + ②：开一次登录会话并取二维码（返回可直接塞进 <img src> 的 data URL）。 */
-const log = (line) => console.log(line);
-const setDetail = (text) => {
-	flow.detail = text;
 };
 
-/**
- * 开一次登录会话并取二维码。
- *
- * 注意最后那个分支：**"宿主流程停在 logged-in"不等于"真的登录着"**。
- * 之前直接把它当成可复用的状态返回，于是闸门拿到 `phase:"logged-in"`，
- * 界面上写着"登录成功"、旁边却是个空二维码位 —— 而实际的登录态可能是失效的。
- * 现在这种情况会**当场验一次**：验证不过就把流程作废、重新发码。
- */
-export async function startLogin({ force = false } = {}) {
-	if (!force && flow.phase !== "idle" && flow.phase !== "expired" && flow.phase !== "failed" && flow.phase !== "uncertain" && Date.now() - flow.startedAt < EXPIRE_MS) {
-		if (flow.phase !== "logged-in") return { ok: true, resumed: true, ...snapshot() };
-		const st = await loginState({ force: true });
-		if (st.loggedIn === true) return { ok: true, resumed: true, ...snapshot() };
-		// 流程说登录成功、真实状态说没有 → 这个流程不作数，往下走重新发码
-		console.log(`[login] 流程停在 logged-in 但登录态验证不过（code=${st.code ?? "?"} ${st.message ?? ""}）→ 重新发码`);
-	}
-	flow = { phase: "idle", qrId: null, cookie: "", bst: "", startedAt: Date.now(), error: null, finalizing: false, detail: "正在向 Boss 要二维码…" };
-
-	const rand = await httpApi("/wapi/zppassport/captcha/randkey", {}, { cookie: "", bst: "" }, { method: "POST" });
-	if (isFlagged(rand.json)) return { ok: false, ...setPhase("flagged", { error: `风控 code 35：${rand.json?.message ?? ""}` }) };
-	absorb(rand);
-	const qrId = rand.json?.zpData?.qrId;
-	if (qrId === undefined) return { ok: false, ...setPhase("failed", { error: `拿不到 qrId：${rand.text?.slice(0, 120)}` }) };
-
-	const res = await fetch(`https://www.zhipin.com/wapi/zpweixin/qrcode/getqrcode?content=${encodeURIComponent(qrId)}`, {
-		headers: { "user-agent": "Mozilla/5.0", referer: "https://www.zhipin.com/web/user/?ka=header-login", cookie: flow.cookie },
-	});
-	const bytes = Buffer.from(await res.arrayBuffer());
-	if (bytes.length === 0) return { ok: false, ...setPhase("failed", { error: `二维码为空（HTTP ${res.status}）` }) };
-	// 按魔数判断真实类型：Boss 这个接口回的是 JPEG，虽然习惯上叫 "qrcode"
-	const mime = bytes[0] === 0x89 && bytes[1] === 0x50 ? "image/png" : bytes[0] === 0xff && bytes[1] === 0xd8 ? "image/jpeg" : "application/octet-stream";
-
-	setPhase("waiting-scan", { qrId, startedAt: Date.now() });
-	return { ok: true, resumed: false, qr: `data:${mime};base64,${bytes.toString("base64")}`, ...snapshot() };
+async function saveLinkedSession(context, verify) {
+	const cookies = await context.cookies(SITE);
+	const cookie = effectiveCookieHeader(cookies).header;
+	const bst = parseCookieJar(cookie).get("bst") ?? "";
+	saveSession({ cookie, bst, stoken: parseCookieJar(cookie).has("__zp_stoken__") ? "present" : null, step: "browser-linked", source: "cdp" });
+	stateCache = { at: Date.now(), value: { loggedIn: true, flagged: false, code: 0, message: verify?.message ?? "Success", source: "cdp" } };
 }
 
-/** ⑤ + ⑥：换了登录凭证之后，用浏览器把 __zp_stoken__ 拿回来。 */
-async function finalize() {
+/** 登录完成后只做一次同页校验；任何风控响应都终止，不重试。 */
+async function verifyOnce() {
+	if (flow.finalizing) return snapshot();
 	flow.finalizing = true;
-	flow.phase = "finalizing";
+	setPhase("verifying", { detail: "检测到登录凭证，正在用当前 Boss 页面校验一次…", error: null });
 	try {
-		const fp = generateFp();
-		const disp = await httpApi("/wapi/zppassport/qrcode/dispatcher", { qrId: flow.qrId, pk: "header-login", fp }, { cookie: flow.cookie, bst: "" });
-		if (isFlagged(disp.json)) return setPhase("flagged", { error: `风控 code 35：${disp.json?.message ?? ""}` });
-		const granted = absorb(disp);
-		if (Object.keys(granted).length === 0) {
-			// 参考项目自己都写了：fp 的两个常量是文档示例值，可能失效
-			return setPhase("failed", { error: "dispatcher 没下发 cookie —— 大概率 fp 的两个常量失效了（见 DESIGN §9.2）" });
+		let page = flow.page;
+		if (page === null || page.isClosed?.()) {
+			page = await flow.context.newPage();
+			flow.page = page;
+			flow.ownedPage = true;
+			await page.goto(`${SITE}/web/geek/jobs`, { waitUntil: "domcontentloaded", timeout: 45000 });
 		}
-		flow.bst = granted.bst ?? "";
-		setDetail("已换到登录凭证，正在过安全验证（要开一次无头浏览器）…");
-
-		const sec = await completeSecurityCheck(flow.cookie, { log, onProgress: setDetail });
-		const finalCookie = sec.stoken === null ? flow.cookie : sec.cookie;
-		// bst 会被 security-check 换成新值 —— 必须把**最终**那个存下来。
-		// 存旧的会让后面每个请求的 cookie 和 zp_token 头对不上，Boss 回 code 37。
-		const finalBst = parseCookieJar(finalCookie).get("bst") ?? flow.bst;
-		saveSession({ cookie: finalCookie, bst: finalBst, stoken: sec.stoken === null ? null : "present", step: sec.verify?.ok === true ? "logged-in" : "unverified" });
-		if (finalBst !== flow.bst) console.log(`[login] bst 被安全验证换过了（${flow.bst.slice(0, 12)}… → ${finalBst.slice(0, 12)}…），已存新的`);
-		flow.bst = finalBst;
-		// 只有 Boss 自己说 code 0 才算登录成功。以前这里是无条件 logged-in，
-		// 于是 UI 会显示"登录成功"，然后第一个请求就回 code 7 —— 现在如实回报。
-		if (sec.verify?.ok !== true) {
-			stateCache = { at: 0, value: null };
-			return setPhase("uncertain", {
-				error: `拿到 cookie 了，但 Boss 说还没登录（code=${sec.verify?.code} ${sec.verify?.message ?? ""}）。多半是这次二维码确认没走完 —— 再扫一次。`,
-			});
+		const response = await browserJson(page, "/wapi/zpuser/wap/getUserInfo.json", {}, { referer: `${SITE}/web/geek/jobs` });
+		const state = classifyBossResponse(response.json, response);
+		if (state.kind !== "success") {
+			riskCooldown(state.kind, `登录校验终止：${response.json?.message ?? state.kind}`);
+			return setPhase(state.kind, { error: response.json?.message ?? `登录校验失败：${state.kind}`, detail: null });
 		}
-		stateCache = { at: Date.now(), value: { loggedIn: true, flagged: false, message: "just logged in" } };
-		return setPhase("logged-in", { account: sec.verify.user ?? null });
+		const user = response.json?.zpData?.userInfo ?? response.json?.zpData ?? {};
+		await saveLinkedSession(flow.context, response.json);
+		return setPhase("logged-in", { account: user.name ?? user.nickName ?? user.uid ?? null, error: null, detail: "已绑定当前 Chrome 会话" });
 	} catch (err) {
-		return setPhase("failed", { error: `验证步骤出错：${String(err.message).split("\n")[0]}` });
+		return setPhase("failed", { error: String(err?.message ?? err), detail: null });
 	} finally {
 		flow.finalizing = false;
 	}
 }
 
-/** UI 轮询这个。每次调用只推进一步，绝不阻塞。 */
+/** 连接现有 Chrome；没有登录时在该 context 里打开一个可见登录页。 */
+export async function startLogin({ force = false } = {}) {
+	if (!force && ["waiting-browser", "verifying", "logged-in"].includes(flow.phase) && Date.now() - flow.startedAt < EXPIRE_MS) {
+		return { ok: true, resumed: true, ...snapshot() };
+	}
+	flow = { phase: "connecting-browser", startedAt: Date.now(), error: null, detail: "正在连接本机 Chrome…", context: null, page: null, ownedPage: false, finalizing: false, account: null };
+	let linked;
+	try {
+		linked = await connectExistingBossBrowser({ requirePage: false });
+	} catch (err) {
+		const code = err instanceof BrowserSessionError ? err.code : "CDP_ERROR";
+		return { ok: false, ...setPhase("browser-unavailable", { error: String(err?.message ?? err), detail: code }) };
+	}
+	flow.context = linked.context;
+	flow.page = linked.page;
+	if (linked.loggedIn) return { ok: true, resumed: false, ...(await verifyOnce()) };
+	try {
+		if (flow.page === null || flow.page.isClosed?.()) {
+			flow.page = await linked.context.newPage();
+			flow.ownedPage = true;
+		}
+		if (!String(flow.page.url()).startsWith(SITE)) {
+			await flow.page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+		}
+		return { ok: true, resumed: false, ...setPhase("waiting-browser", { detail: "请在刚打开的 Chrome 标签里扫码并完成手机验证" }) };
+	} catch (err) {
+		return { ok: false, ...setPhase("failed", { error: `打开 Boss 登录页失败：${String(err?.message ?? err)}`, detail: null }) };
+	}
+}
+
+/** 轮询只读浏览器 cookie；出现 wt2 后才做一次网络校验。 */
 export async function pollLogin() {
-	if (flow.qrId === null) return snapshot();
-	if (flow.finalizing) return snapshot(); // ⑥ 正在跑（要开浏览器，几秒），别并发触发
-	// 过期只对"还没扫"有意义：一旦扫上了，等你按确认是人的事，不能因为几分钟就作废
-	if (flow.phase === "waiting-scan" && Date.now() - flow.startedAt > EXPIRE_MS) {
-		return setPhase("expired", { error: "二维码已过期，请重新获取" });
+	if (flow.phase !== "waiting-browser") return snapshot();
+	if (Date.now() - flow.startedAt > EXPIRE_MS) return setPhase("expired", { error: "等待登录超时，请重新连接浏览器", detail: null });
+	try {
+		const cookies = await flow.context.cookies(SITE);
+		const loggedIn = cookies.some((cookie) => cookie.name === "wt2" && String(cookie.value).length > 0);
+		if (!loggedIn) return snapshot();
+		return verifyOnce();
+	} catch (err) {
+		return setPhase("failed", { error: `读取 Chrome 登录态失败：${String(err?.message ?? err)}`, detail: null });
 	}
-
-	const sess = { cookie: flow.cookie, bst: flow.bst };
-	if (flow.phase === "waiting-scan") {
-		const r = await httpApi("/wapi/zppassport/qrcode/scan", { uuid: flow.qrId }, sess);
-		absorb(r);
-		if (isFlagged(r.json)) return setPhase("flagged", { error: `风控 code 35：${r.json?.message ?? ""}` });
-		if (r.json?.scaned === true) return setPhase("waiting-confirm");
-		return snapshot();
-	}
-	if (flow.phase === "waiting-confirm") {
-		const r = await httpApi("/wapi/zppassport/qrcode/scanLogin", { qrId: flow.qrId, status: 1 }, sess);
-		absorb(r);
-		if (isFlagged(r.json)) return setPhase("flagged", { error: `风控 code 35：${r.json?.message ?? ""}` });
-		// 实测这个接口回的是 {"scaned":true,"newScaned":true,"login":true} —— **没有 code 字段**。
-		// 所以判据是 login === true（code === 0 只是留着兼容别的返回形态）。
-		if (r.json?.login === true || r.json?.code === 0) return finalize();
-		return snapshot();
-	}
-	if (flow.phase === "finalizing") return snapshot();
-	return snapshot();
 }
 
-/** 当前登录态。带 30 秒缓存，页面挂载时问一次不会打爆 Boss。 */
+/** 状态检查只看现有浏览器/cookie，不在页面挂载时额外请求 Boss。 */
 export async function loginState({ force = false } = {}) {
-	const session = (await import("./lib.mjs")).loadSession();
-	if (session === null) return { loggedIn: false, present: false };
 	if (!force && stateCache.value !== null && Date.now() - stateCache.at < STATE_TTL_MS) return { ...stateCache.value, present: true, cached: true };
-	const state = await loginStateHttp(session);
-	const value = { loggedIn: state.loggedIn, flagged: state.flagged, message: state.message, code: state.code ?? null };
+	const status = await existingBrowserStatus();
+	const value = status.ok
+		? { loggedIn: status.loggedIn && status.hasPage, flagged: false, code: null, message: status.loggedIn ? (status.hasPage ? "Chrome 已登录" : "请在 Chrome 打开 Boss 页面") : "Chrome 中尚未登录", source: "cdp", browser: status }
+		: { loggedIn: false, flagged: false, code: status.code, message: status.error, source: "cdp", browser: status };
 	stateCache = { at: Date.now(), value };
-	return { ...value, present: true };
+	return { ...value, present: status.loggedIn };
 }
 
-/**
- * 退出登录：清 session.json + 清浏览器 profile 的 cookie + 把状态机复位。
- *
- * 三件都要做，少一件都会留下"半退出"状态：
- *   - 只清 session.json → 浏览器 profile 里 cookie 还在，下次开浏览器抓取仍带登录态；
- *   - 只清 profile → Node 那边照样能拿 session.json 发请求；
- *   - 不复位 flow → `/boss/login/start` 会把旧流程当"登录成功"复用（见 14.2）。
- */
+/** 这里只解除插件绑定，不退出用户真实 Chrome 里的 Boss。 */
 export async function logout() {
-	const { clearBrowserCookies, clearSession } = await import("./lib.mjs");
 	clearSession();
-	const clearedCookies = await clearBrowserCookies();
-	flow = { phase: "idle", qrId: null, cookie: "", bst: "", startedAt: 0, error: null, finalizing: false, detail: null };
+	flow = { phase: "idle", startedAt: 0, error: null, detail: null, context: null, page: null, ownedPage: false, finalizing: false, account: null };
 	stateCache = { at: 0, value: null };
-	return { ok: true, clearedCookies, at: new Date().toISOString() };
+	return { ok: true, clearedCookies: 0, browserCookiesUntouched: true, at: new Date().toISOString() };
 }
 
 export const currentFlow = () => snapshot();

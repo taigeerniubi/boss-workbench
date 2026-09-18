@@ -20,12 +20,17 @@
  * `/boss` 前缀由 webServer 的最长前缀匹配独占，不会碰到 shell 自己的路由。
  */
 import { join } from "node:path";
-import { DATA_DIR, RESUMES_DIR, loadProfile, loadSession, loginStateHttp, readCooldown, readJson, writeJson } from "../../boss/lib.mjs";
+import { existingBrowserStatus } from "../../boss/browser-channel.mjs";
+import { fetchJobDetail } from "../../boss/detail.mjs";
+import { DATA_DIR, FILTER_SPECS, RESUMES_DIR, loadCities, loadProfile, loadSession, readCooldown, readJson, writeJson } from "../../boss/lib.mjs";
 import { fetchBalance } from "../../boss/balance.mjs";
 import { loginState, logout, pollLogin, startLogin } from "../../boss/loginflow.mjs";
 import { buildGreeting, sendGreeting } from "../../boss/greet.mjs";
 import { buildIndex, readIndex, removeResume, saveUpload } from "../../boss/resumes.mjs";
 import { runScrape } from "../../boss/jobs.mjs";
+import { readWatch, runWatch, saveWatch } from "../../boss/watch.mjs";
+import { createReplyAdvice, tailorResumeForJob } from "../../boss/career-assistant.mjs";
+import { fetchConversation, fetchMessageThreads, findThreadForJob, sendReply } from "../../boss/messages.mjs";
 
 const PREFIX = "/boss";
 const MAX_UPLOAD = 32 * 1024 * 1024;
@@ -69,8 +74,8 @@ function isTrusted(ctx, req) {
 const trimJob = (j) => ({
 	id: j.id, company: j.company, title: j.title, salary: j.salary, city: j.city, area: j.area,
 	distanceKm: j.distanceKm, hr: j.hr, industry: j.industry, experience: j.experience, degree: j.degree,
-	securityId: j.securityId, encryptJobId: j.encryptJobId, url: j.url, jd: (j.jd ?? "").slice(0, 4000),
-	scrapedAt: j.scrapedAt,
+	securityId: j.securityId, encryptJobId: j.encryptJobId, lid: j.lid ?? "", url: j.url, jd: (j.jd ?? "").slice(0, 4000),
+	hrTitle: j.hrTitle, welfare: j.welfare, scale: j.scale, stage: j.stage, detailFetchedAt: j.detailFetchedAt ?? null, scrapedAt: j.scrapedAt,
 });
 /** 选哪份简历：指定 → 默认 → 第一份能用的。 */
 function pickResume(index, name) {
@@ -102,6 +107,7 @@ async function handle(ctx, req, res) {
 	if (method === "GET" && path === "/state") {
 		const jobsFile = readJobsFile();
 		const session = loadSession();
+		const browser = await existingBrowserStatus();
 		return sendJson(res, 200, {
 			ok: true,
 			resumes: readIndex(),
@@ -109,11 +115,21 @@ async function handle(ctx, req, res) {
 			jobsUpdatedAt: jobsFile?.updatedAt ?? null,
 			lastQuery: jobsFile?.lastQuery ?? null,
 			profile: loadProfile(),
+			cities: loadCities(),
+			// 筛选维度的**唯一真相**在 boss/lib.mjs 的 FILTER_SPECS；客户端不再自己抄一份，
+			// 免得像上一版那样 UI 只放了 7 个行业、宿主字典里其实有 23 个。
+			filterSpecs: FILTER_SPECS.map(({ key, label, options }) => ({ key, label, options })),
 			session: session === null ? { present: false } : { present: true, hasStoken: Boolean(session.stoken), savedAt: session.savedAt ?? null },
+			browser,
+			watch: readWatch(),
 			// 冷却期：撞过风控就锁上。界面要能看见"为什么现在不让我抓"
 			cooldown: readCooldown(),
 			resumesDir: RESUMES_DIR,
 		});
+	}
+
+	if (method === "GET" && path === "/browser/status") {
+		return sendJson(res, 200, { ok: true, browser: await existingBrowserStatus() });
 	}
 
 	// ── 抓岗位：工作台的「搜索 / 抓取」按钮打到这里，和 CLI 是同一个 runScrape ——
@@ -131,6 +147,10 @@ async function handle(ctx, req, res) {
 			experience: body.experience,
 			jobType: body.jobType,
 			salary: body.salary,
+			degree: body.degree,
+			industry: body.industry,
+			scale: body.scale,
+			stage: body.stage,
 			save: body.save !== false,
 		});
 		const jobsFile = readJobsFile();
@@ -148,6 +168,90 @@ async function handle(ctx, req, res) {
 			jobs: stateJobs(),
 			jobsUpdatedAt: jobsFile?.updatedAt ?? null,
 			lastQuery: jobsFile?.lastQuery ?? null,
+		});
+	}
+
+	// 会话读取全部由用户显式触发；不会随页面加载自动请求。
+	if (method === "GET" && path === "/messages") {
+		const count = Math.min(Math.max(Number(url.searchParams.get("count")) || 20, 1), 20);
+		const result = await fetchMessageThreads({ count });
+		return sendJson(res, result.ok ? 200 : 409, result);
+	}
+	if (method === "GET" && path === "/messages/history") {
+		const friendId = Number(url.searchParams.get("friendId"));
+		if (!Number.isFinite(friendId) || friendId <= 0) return sendJson(res, 400, { ok: false, error: "friendId 无效" });
+		const result = await fetchConversation(friendId, { count: 20, myUid: Number(url.searchParams.get("myUid")) || 0 });
+		return sendJson(res, result.ok ? 200 : 409, result);
+	}
+	if (method === "POST" && path === "/messages/for-job") {
+		const { jobId } = await readJsonBody(req);
+		const job = findJob(jobId);
+		if (!job) return sendJson(res, 404, { ok: false, error: `岗位 ${jobId} 不在岗位库里` });
+		const threads = await fetchMessageThreads({ count: 20 });
+		if (!threads.ok) return sendJson(res, 409, threads);
+		const thread = findThreadForJob(threads.threads, job);
+		if (!thread) return sendJson(res, 404, { ok: false, error: "当前岗位还没有匹配到沟通会话", threads: threads.threads });
+		const conversation = await fetchConversation(thread.friendId, { count: 20, myUid: threads.myUid });
+		return sendJson(res, conversation.ok ? 200 : 409, { ...conversation, thread });
+	}
+
+	if (method === "POST" && path === "/assist/tailor-resume") {
+		const { jobId, resumeName } = await readJsonBody(req);
+		const result = tailorResumeForJob(jobId, resumeName);
+		return sendJson(res, result.ok ? 200 : 400, result);
+	}
+	if (method === "POST" && path === "/assist/reply") {
+		const { jobId, resumeName, conversation } = await readJsonBody(req);
+		const result = createReplyAdvice(jobId, resumeName, conversation);
+		return sendJson(res, result.ok ? 200 : 400, result);
+	}
+
+	// ── 发消息：整条链路里**唯一**的写操作，所以单独一个路由、单独一层确认 ──────
+	// 求职端没有"发消息"的 HTTP 接口，这里走 MQTT（boss/mqtt-chat.mjs）。
+	// 必须 `confirm: true` 才真发 —— 缺这个字段一律拒绝，杜绝"误点一下就发出去了"。
+	if (method === "POST" && path === "/messages/reply") {
+		const body = await readJsonBody(req);
+		if (body.confirm !== true) {
+			return sendJson(res, 428, { ok: false, reason: "not-confirmed", error: "发送需要显式确认：请求体要带 confirm: true" });
+		}
+		const friendId = Number(body.friendId);
+		const result = await sendReply(friendId, body.text);
+		return sendJson(res, result.ok ? 200 : 409, result);
+	}
+	// 只读：发消息之前先把"将要发什么、发给谁"摆出来给人看。
+	if (method === "POST" && path === "/messages/reply/preview") {
+		const { friendId, jobId } = await readJsonBody(req);
+		const target = Number(friendId) || 0;
+		if (target > 0) return sendJson(res, 200, { ok: true, friendId: target });
+		const job = findJob(jobId);
+		if (!job) return sendJson(res, 404, { ok: false, error: `岗位 ${jobId} 不在岗位库里` });
+		const threads = await fetchMessageThreads({ count: 20 });
+		if (!threads.ok) return sendJson(res, 409, threads);
+		const thread = findThreadForJob(threads.threads, job);
+		if (!thread) return sendJson(res, 404, { ok: false, error: "当前岗位还没有匹配到沟通会话" });
+		return sendJson(res, 200, { ok: true, friendId: thread.friendId, thread });
+	}
+
+	// JD 按需取：一次只取一个，避免列表出来后自动连打 30 个详情请求。
+	if (method === "POST" && path === "/jobs/detail") {
+		const { id } = await readJsonBody(req);
+		if (typeof id !== "string" || id === "") return sendJson(res, 400, { ok: false, error: "缺少岗位 id" });
+		const result = await fetchJobDetail(id);
+		return sendJson(res, result.ok ? 200 : 409, { ...result, jobs: stateJobs() });
+	}
+
+	// 监听沿用同一条搜索通道；保存不联网，run 才做一次单页检查。
+	if (method === "GET" && path === "/watch") return sendJson(res, 200, { ok: true, watch: readWatch() });
+	if (method === "POST" && path === "/watch/save") {
+		const body = await readJsonBody(req);
+		return sendJson(res, 200, { ok: true, watch: saveWatch(body) });
+	}
+	if (method === "POST" && path === "/watch/run") {
+		const result = await runWatch();
+		return sendJson(res, result.ok ? 200 : 409, {
+			...result,
+			newItems: (result.newItems ?? []).map(trimJob),
+			jobs: stateJobs(),
 		});
 	}
 
@@ -214,17 +318,19 @@ async function handle(ctx, req, res) {
 
 	if (method === "POST" && path === "/greet/send") {
 		const { jobId, text, resumeName } = await readJsonBody(req);
-		const session = loadSession();
-		if (session === null) return sendJson(res, 400, { ok: false, error: "还没有登录会话，先跑 node boss/login.mjs" });
 		const job = findJob(jobId);
 		if (job === undefined) return sendJson(res, 404, { ok: false, error: `岗位 ${jobId} 不在 data/jobs.json 里` });
 		const resume = pickResume(readIndex(), resumeName);
 		const greeting = typeof text === "string" && text.trim() !== "" ? { text } : buildGreeting({ resume: resume?.structured ?? {}, job, profile: loadProfile() });
 
-		const state = await loginStateHttp(session);
-		if (state.flagged) return sendJson(res, 429, { ok: false, error: "风控 code 35（IP 异常）—— 停手，等冷却" });
-		if (!state.loggedIn) return sendJson(res, 401, { ok: false, error: "登录态失效，重新跑 node boss/login.mjs" });
-		const r = await sendGreeting(session, { securityId: job.securityId, jobId: job.encryptJobId || job.id });
+		// 注意：`text` 是用户在输入框里改过的原话，必须原样发出去。
+		const r = await sendGreeting(null, {
+			securityId: job.securityId,
+			jobId: job.encryptJobId || job.id,
+			lid: job.lid ?? "",
+			text: greeting.text,
+			referer: job.url || undefined,
+		});
 
 		// 成功失败都留档，方便在 runs/ 回看
 		try {

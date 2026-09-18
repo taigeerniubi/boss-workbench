@@ -5,20 +5,29 @@
  * 之前只有 CLI，工作台只能干看着 data/jobs.json，这就是"输入了没反应"的根。
  *
  * 三条硬约束原样保留（账号比数据重要）：
- *   1. code 35（IP 异常）立刻停，不重试、不换姿势硬撞；
- *   2. 页间随机延时，页数默认 3、上限 10；
- *   3. 只有显式 confirm 才真联网。
+ *   1. 只复用现有 Chrome/Boss 页面，不创建隐身 profile，不走 Node 直连；
+ *   2. code 35/36/37/403 立刻停，不重试、不换通道；
+ *   3. 页数默认 1、上限 5，页间保留随机延时。
  */
 import { join } from "node:path";
+import { browserJson, classifyBossResponse, connectExistingBossBrowser } from "./browser-channel.mjs";
 import {
-	DATA_DIR, EXPERIENCE_MAP, JOB_TYPE_MAP, RUNS_DIR, SALARY_MAP, ensureDirs, filterJobs, httpApi,
-	isFlagged, isLoggedOut, loadProfile, loadSession, markCooldown, normalizeJob, readCooldown, readJson,
+	DATA_DIR, RUNS_DIR, ensureDirs, filterCode, filterJobs,
+	EDUCATION_MAP, EXPERIENCE_MAP, INDUSTRY_MAP, JOB_TYPE_MAP, SALARY_MAP, SCALE_MAP, STAGE_MAP,
+	loadProfile, markCooldown, normalizeJob, readCooldown, readJson,
 	resolveCity, writeJson,
 } from "./lib.mjs";
 
-export const MAX_PAGES = 10;
-export const RECOMMEND_PATH = "/wapi/zpgeek/pc/recommend/job/list.json";
+export const MAX_PAGES = 5;
 export const SEARCH_PATH = "/wapi/zpgeek/search/joblist.json";
+/** 推荐流。旧的 `/wapi/zpgeek/pc/recommend/job/list.json` 已不再被 Web 端使用。 */
+export const RECOMMEND_PATH = "/wapi/zprelation/interaction/geekGetJob";
+export const REFERER = {
+	search: "https://www.zhipin.com/web/geek/job",
+	recommend: "https://www.zhipin.com/web/geek/recommend",
+};
+/** 推荐流的响应把岗位放在 cardList 里（有的版本仍叫 jobList）。 */
+const listFrom = (data) => data?.jobList ?? data?.cardList ?? [];
 
 /**
  * 跑一轮抓取。
@@ -38,32 +47,28 @@ export const SEARCH_PATH = "/wapi/zpgeek/search/joblist.json";
  */
 export async function runScrape(opts = {}) {
 	const profile = loadProfile();
-	const session = loadSession();
 	const log = typeof opts.log === "function" ? opts.log : () => {};
 	const mode = opts.mode === "recommend" ? "recommend" : "search";
 	const city = opts.city ?? profile.homeCity;
 	const query = opts.query ?? profile.keywords?.[0] ?? "";
 	const pageSize = Math.min(Math.max(Number(opts.pageSize) || 30, 1), 30);
-	const pages = Math.min(Math.max(Number(opts.pages) || 3, 1), MAX_PAGES);
-	const minDelay = Number(opts.minDelay) || 3000;
-	const maxDelay = Math.max(Number(opts.maxDelay) || 8000, minDelay);
+	const pages = Math.min(Math.max(Number(opts.pages) || 1, 1), MAX_PAGES);
+	const minDelay = Number(opts.minDelay) || 5000;
+	const maxDelay = Math.max(Number(opts.maxDelay) || 9000, minDelay);
 	const maxKm = opts.maxKm ?? null;
 	const save = opts.save !== false;
-
-	if (session === null) return { ok: false, reason: "no-session", error: "还没有登录会话 —— 先在工作台里扫码登录（或跑 node boss/login.mjs）" };
 
 	// ── 冷却期：撞过风控就别再打了 ──────────────────────────────────────────
 	// 风控按行为频率扣分，而人在排障时最容易做的就是"再试一次"。
 	// 所以把"停手"做成规则：见过 code 35/37 之后这里直接拒绝执行。
 	const cold = readCooldown();
-	if (cold !== null && cold.expired === false && opts.ignoreCooldown !== true) {
+	if (cold !== null && cold.expired === false) {
 		const mins = Math.ceil(cold.remainingMs / 60000);
 		return {
 			ok: false,
 			reason: "cooldown",
 			error: `还在冷却期（约 ${mins} 分钟后解禁）。上一次撞到：${cold.message ?? cold.kind}。\n`
-				+ `  风控是按频率扣分的，"再试一次"只会把分推得更高。\n`
-				+ `  确实要现在跑：node boss/scrape.mjs … --ignore-cooldown，或者删掉 ${join(DATA_DIR, "cooldown.json")}`,
+				+ `  风控是按频率扣分的，"再试一次"只会把分推得更高。`,
 			cooldown: { kind: cold.kind, until: cold.until, remainingMs: cold.remainingMs, message: cold.message },
 		};
 	}
@@ -80,55 +85,54 @@ export async function runScrape(opts = {}) {
 	const collected = [];
 	const rawPages = [];
 	let stopped = null;
+	let linked;
+	try {
+		linked = opts.transport === undefined ? await connectExistingBossBrowser() : null;
+	} catch (err) {
+		return { ok: false, reason: err?.code ?? "browser", error: String(err?.message ?? err), fetched: 0, added: 0, jobs: [] };
+	}
+	if (opts.transport === undefined && linked?.loggedIn !== true) {
+		return { ok: false, reason: "logged-out", error: "现有 Chrome 里的 Boss 尚未登录，请先在该浏览器标签中完成登录" };
+	}
+	const request = opts.transport?.request ?? ((path, params, options) => browserJson(linked.page, path, params, options));
 
 	for (let p = 1; p <= pages; p++) {
 		let path = SEARCH_PATH;
 		let params;
 		if (mode === "recommend") {
+			// 推荐流只认 page / tag / isActive；筛选项由本地在抓回来之后施加。
 			path = RECOMMEND_PATH;
-			params = { page: p, pageSize };
-			if (opts.experience !== undefined && opts.experience !== null) params.experience = EXPERIENCE_MAP[opts.experience] ?? opts.experience;
-			if (opts.jobType !== undefined && opts.jobType !== null) params.jobType = JOB_TYPE_MAP[opts.jobType] ?? opts.jobType;
-			if (opts.salary !== undefined && opts.salary !== null) params.salary = SALARY_MAP[opts.salary] ?? opts.salary;
+			params = { page: p, tag: 5, isActive: "true" };
 		} else {
 			params = { scene: 1, query, city: cityCode, page: p, pageSize };
-			if (opts.experience !== undefined && opts.experience !== null) params.experience = EXPERIENCE_MAP[opts.experience] ?? opts.experience;
+			// 只有"选中的维度"才带参数；标签先过字典翻成服务端码，翻不到就原样发（服务端会自己报错）。
+			const maps = { experience: EXPERIENCE_MAP, degree: EDUCATION_MAP, salary: SALARY_MAP, industry: INDUSTRY_MAP, scale: SCALE_MAP, stage: STAGE_MAP, jobType: JOB_TYPE_MAP };
+			for (const [key, map] of Object.entries(maps)) {
+				const code = filterCode(map, opts[key]);
+				if (code !== null) params[key] = code;
+			}
 		}
 
 		let r;
 		try {
-			r = await httpApi(path, params, session, { referer: mode === "recommend" ? "https://www.zhipin.com/web/geek/job-recommend" : "https://www.zhipin.com/web/geek/jobs" });
+			r = await request(path, params, { referer: REFERER[mode] });
 		} catch (err) {
-			stopped = { kind: "network", message: String(err?.message ?? err) };
+			stopped = { kind: err?.code ?? "browser", message: String(err?.message ?? err) };
 			rawPages.push({ page: p, error: String(err?.message ?? err) });
 			break;
 		}
 
-		if (isFlagged(r.json)) {
-			stopped = { kind: "flagged", message: `风控 code 35：${r.json.message}` };
-			markCooldown({ kind: "flagged", message: `code 35 风控：${r.json.message}` });
-			rawPages.push({ page: p, url: r.url, flagged: true, body: r.json });
-			break;
-		}
-		if (isLoggedOut(r.json)) {
-			stopped = { kind: "logged-out", message: `登录态失效（code ${r.json.code}）` };
-			rawPages.push({ page: p, url: r.url, body: r.json });
-			break;
-		}
-		if (r.json?.code === 37) {
-			stopped = { kind: "abnormal-env", message: `Boss 说"您的环境存在异常"（code 37）：${JSON.stringify(r.json?.zpData ?? {}).slice(0, 200)}` };
-			// 37 是签名挑战，重试**不会**变好；而且连着重试同样会推高风险分。短锁一下。
-			markCooldown({ kind: "abnormal-env", message: "code 37 环境异常（签名挑战，重试无用）" });
-			rawPages.push({ page: p, url: r.url, body: r.json });
-			break;
-		}
-		if (r.json?.code !== 0) {
-			stopped = { kind: "api", message: `code=${r.json?.code} ${r.json?.message ?? ""}` };
-			rawPages.push({ page: p, url: r.url, body: r.json ?? r.text?.slice(0, 800) });
+		const responseState = classifyBossResponse(r.json, r);
+		if (responseState.kind !== "success") {
+			stopped = { kind: responseState.kind, message: `code=${r.json?.code ?? r.status ?? "?"} ${r.json?.message ?? responseState.kind}` };
+			if (["ip-risk", "account-risk", "environment-risk", "browser-blocked", "rate-limited"].includes(responseState.kind)) {
+				markCooldown({ kind: responseState.kind, message: stopped.message });
+			}
+			rawPages.push({ page: p, url: r.url, code: r.json?.code ?? null, message: r.json?.message ?? responseState.kind });
 			break;
 		}
 
-		const list = r.json?.zpData?.jobList ?? [];
+		const list = listFrom(r.json?.zpData ?? {});
 		rawPages.push({ page: p, url: r.url, count: list.length });
 		for (const item of list) collected.push(normalizeJob(item, profile));
 		log(`第 ${p} 页：${list.length} 条（累计 ${collected.length}）`);
@@ -136,48 +140,24 @@ export async function runScrape(opts = {}) {
 		if (p < pages) await new Promise((res) => setTimeout(res, minDelay + Math.random() * (maxDelay - minDelay)));
 	}
 
-	// ── 撞上签名挑战（code 37）就换浏览器来发这个请求 ────────────────────────
-	// Code 37 的响应体是 `{seed, name, ts}`：Boss 要的不是"你登录了没有"，
-	// 而是"这个请求是不是它自己的页面发的"。那套算法在 Boss 的 JS bundle 里而且会变，
-	// 硬逆向等于跟一个每天变的目标赛跑。换个思路：**让它的页面去发**，我们只截 JSON。
-	//
-	// 但默认**不**自动兜底：兜底会再打一次 Boss（开浏览器 + 发请求），
-	// 而"别频繁测"比"少点一次"重要。要用显式开：--browser / browserFallback: true。
-	const usedBrowser = stopped?.kind === "abnormal-env" && mode === "search" && opts.browserFallback === true;
-	if (usedBrowser) {
-		log("Node 直连被签名挑战挡了（code 37）→ 改用浏览器发这个搜索请求");
-		try {
-			const { browserSearch } = await import("./browser-search.mjs");
-			const br = await browserSearch({ city, query, page: 1, log });
-			rawPages.push({ browser: true, ok: br.ok, code: br.code, message: br.message, onPage: br.onPage, attempts: br.attempts });
-			if (br.ok) {
-				collected.length = 0; // 以浏览器这批为准
-				for (const item of br.jobs) collected.push(normalizeJob(item, profile));
-				stopped = null;
-				log(`浏览器抓到 ${br.jobs.length} 条`);
-			} else {
-				stopped = {
-					kind: "browser-blocked",
-					message: `浏览器也没发出去：code=${br.code ?? "?"} ${br.message ?? ""}`
-						+ (br.onPage?.includes("verify") ? ` —— 页面被弹到验证墙了，先跑 node boss/verify-browser.mjs 过一次真人验证` : ""),
-					onPage: br.onPage ?? null,
-				};
-				markCooldown({ kind: "browser-blocked", message: "浏览器路径也不通（网页端不认这个登录态）" });
-			}
-		} catch (err) {
-			stopped = { kind: "browser-error", message: `浏览器兜底失败：${String(err?.message ?? err).split("\n")[0]}` };
-		}
-	}
+	const usedBrowser = true;
+
+	// ── 距离是**本地**筛的：服务端没有 maxKm 参数 ──────────────────────────
+	// 之前这里只把 maxKm 原样写进 lastQuery 就完事，"筛选"其实没落到结果上，
+	// 界面上的距离下拉因此形同虚设。现在真正过一遍 filterJobs，
+	// 并且把"被距离筛掉多少"如实报出来，免得用户以为 Boss 没岗位。
+	const distanceOk = maxKm === null ? collected : filterJobs(collected, { maxKm });
+	const droppedByDistance = collected.length - distanceOk.length;
 
 	// ── 合并进 data/jobs.json（按 id 去重）──────────────────────────────────
 	let jobs = [];
 	let added = 0;
 	let updatedAt = null;
-	if (save && collected.length > 0) {
+	if (save && distanceOk.length > 0) {
 		const jobsPath = join(DATA_DIR, "jobs.json");
 		const prev = readJson(jobsPath, { version: 1, jobs: [] }) ?? { version: 1, jobs: [] };
 		const byId = new Map((prev.jobs ?? []).map((j) => [j.id, j]));
-		for (const j of collected) {
+		for (const j of distanceOk) {
 			const old = byId.get(j.id);
 			if (old === undefined) added++;
 			byId.set(j.id, { ...old, ...j, firstSeenAt: old?.firstSeenAt ?? j.scrapedAt, lastSeenAt: j.scrapedAt });
@@ -186,7 +166,7 @@ export async function runScrape(opts = {}) {
 		updatedAt = new Date().toISOString();
 		writeJson(jobsPath, {
 			version: 1, updatedAt,
-			lastQuery: { mode, city, cityCode, query, maxKm, pages },
+			lastQuery: { mode, city, cityCode, query, maxKm, pages, filters: { experience: opts.experience ?? null, degree: opts.degree ?? null, salary: opts.salary ?? null, industry: opts.industry ?? null, scale: opts.scale ?? null, stage: opts.stage ?? null, jobType: opts.jobType ?? null } },
 			count: jobs.length, jobs,
 		});
 	} else {
@@ -202,16 +182,19 @@ export async function runScrape(opts = {}) {
 	}
 
 	return {
-		ok: stopped === null || collected.length > 0,
+		ok: stopped === null || distanceOk.length > 0,
 		mode, city, cityCode, query,
-		fetched: collected.length,
+		fetched: distanceOk.length,
+		fetchedJobs: distanceOk,
+		rawFetched: collected.length,
+		droppedByDistance,
 		added,
-		saved: save && collected.length > 0,
+		saved: save && distanceOk.length > 0,
 		total: jobs.length,
 		jobs,
 		stopped,
 		usedBrowser,
 		cooldown: readCooldown(),
-		nearKm: maxKm === null ? null : filterJobs(jobs, { maxKm }).length,
+		nearKm: maxKm === null ? null : distanceOk.length,
 	};
 }

@@ -158,7 +158,17 @@ export const isFlagged = (json) =>
  * 城市码。只内置两个**实测确认过**的（defaultcity.json 与搜索 URL 都印证过），
  * 其余一律走 data/cities.json 缓存 —— 宁可在缺城市时报错，也不塞一堆可能错的码。
  */
-const BUILTIN_CITIES = { 北京: "101010100", 上海: "101020100" };
+// boss.yaml 的静态字典；运行时 city/site.json 仍可覆盖/补充。
+const BUILTIN_CITIES = {
+	全国: "100010000", 北京: "101010100", 上海: "101020100", 广州: "101280100", 深圳: "101280600", 杭州: "101210100",
+	成都: "101270100", 南京: "101190100", 武汉: "101200100", 西安: "101110100", 苏州: "101190400",
+	长沙: "101250100", 郑州: "101180100", 重庆: "101040100", 天津: "101030100", 合肥: "101220100",
+	厦门: "101230200", 济南: "101120100", 青岛: "101120200", 大连: "101070200", 宁波: "101210400",
+	福州: "101230100", 东莞: "101281600", 珠海: "101280700", 佛山: "101280800", 昆明: "101290100",
+	贵阳: "101260100", 太原: "101100100", 南昌: "101240100", 南宁: "101300100", 石家庄: "101090100",
+	哈尔滨: "101050100", 长春: "101060100", 沈阳: "101070100", 海口: "101310100", 兰州: "101160100",
+	乌鲁木齐: "101130100", 无锡: "101190200", 常州: "101191100", 温州: "101210700", 惠州: "101280300",
+};
 const citiesPath = () => join(DATA_DIR, "cities.json");
 
 export function loadCities() {
@@ -277,6 +287,9 @@ export function normalizeJob(item, home) {
 		welfare: pick("welfareList") ?? [],
 		securityId: pick("securityId") ?? "",
 		encryptJobId: pick("encryptJobId") ?? "",
+		// lid 是列表条目里自带的"这一次检索"的短票；打招呼（friend/add.json）要它，
+		// 而且**必须原样回传**同一条目里的 lid，不能自己拼、也别跨岗位复用。
+		lid: pick("lid") ?? "",
 		url: id === "" ? "" : `${SITE}/job_detail/${id}.html`,
 		jd: pick("jobDescription", "postDescription", "jobDesc") ?? "",
 		scrapedAt: new Date().toISOString(),
@@ -435,7 +448,15 @@ export const isLoggedOut = (json) => json !== null && typeof json === "object" &
 const COOLDOWN_PATH = () => join(DATA_DIR, "cooldown.json");
 
 /** 风控信号分别锁多久。35 是硬风控（IP/账号异常），37 是签名挑战（重试也没用，但短锁）。 */
-export const COOLDOWN_MINUTES = { flagged: 120, "abnormal-env": 20, "browser-blocked": 20 };
+export const COOLDOWN_MINUTES = {
+	flagged: 120,
+	"abnormal-env": 120,
+	"ip-risk": 120,
+	"account-risk": 24 * 60,
+	"environment-risk": 120,
+	"browser-blocked": 120,
+	"rate-limited": 60,
+};
 
 export function readCooldown() {
 	const c = readJson(COOLDOWN_PATH(), null);
@@ -655,7 +676,77 @@ export function effectiveCookieHeader(cookies) {
 }
 
 /** 筛选枚举的代码表（取自参考项目，与 filter/conditions.json 一致）。 */
-export const EXPERIENCE_MAP = { 在校生: 108, 应届生: 102, 不限: 101, 一年以内: 103, 一到三年: 104, 三到五年: 105, 五到十年: 106, 十年以上: 107 };
-export const JOB_TYPE_MAP = { 全职: 1901, 兼职: 1903 };
-export const SALARY_MAP = { "3k以下": 402, "3-5k": 403, "5-10k": 404, "10-20k": 405, "20-50k": 406, "50以上": 407 };
+/**
+ * 筛选字典（服务端参数码）。
+ *
+ * ⚠️ 这批数字**不是拍脑袋写的**，是 zhipin-geek（求职端 CLI）源码里那份可用字典：
+ *   薪资 401-408 是 8 档（3K以下 / 3-5K / 5-10K / 10-15K / 15-20K / 20-30K / 30-50K / 50K以上），
+ *   经验 101-105 是 5 档（1年以内 / 1-3年 / 3-5年 / 5-10年 / 10年以上）+ 108 在校应届，
+ *   学历 206-209 是高中以下那几档。
+ * 之前这里用的是另一套编号（薪资只有 7 档、经验用了 103/104/105 当 1-3/3-5/5-10 年），
+ * 那套会让「10-20K」「15-20K」这类选项直接落到错误的档位上 —— 筛选看着生效，其实筛错。
+ * 术语：`UNLIMITED_CODE` 是 Boss 自己的「不限」（zhipin-geek 用字符串 "0"，
+ * 我们发数字也等价；本插件用 null 表示"没选"，所以这里只提供映射，不提供"不限"项）。
+ */
+export const UNLIMITED_CODE = 0;
+export const EXPERIENCE_MAP = {
+	不限: 0,
+	应届: 108, 应届生: 108, "在校/应届": 108,
+	"1年以内": 101, 一年以内: 101,
+	"1-3年": 102, 一到三年: 102,
+	"3-5年": 103, 三到五年: 103,
+	"5-10年": 104, 五到十年: 104,
+	"10年以上": 105, 十年以上: 105,
+};
+export const EDUCATION_MAP = {
+	不限: 0,
+	初中及以下: 209, "中专/中技": 208, 高中: 206,
+	大专: 202, 本科: 203, 硕士: 204, 博士: 205,
+};
+export const JOB_TYPE_MAP = { 不限: 0, 全职: 1901, 实习: 1902, 兼职: 1903 };
+export const SALARY_MAP = {
+	不限: 0,
+	"3K以下": 401, "3k以下": 401,
+	"3-5K": 402, "3-5k": 402,
+	"5-10K": 403, "5-10k": 403,
+	"10-15K": 404, "10-15k": 404,
+	"15-20K": 405, "15-20k": 405,
+	"20-30K": 406, "20-30k": 406,
+	"30-50K": 407, "30-50k": 407,
+	"50K以上": 408, "50以上": 408,
+	// 旧编号兜底：10-20K→405 / 20-50K→406 / 50K以上→407 是上一版的错映射，
+	// 不保留 —— 那正是要修掉的 bug，保留兜底等于把它藏起来。
+};
+export const SCALE_MAP = { 不限: 0, "0-20人": 301, "20-99人": 302, "100-499人": 303, "500-999人": 304, "1000-9999人": 305, "10000人以上": 306 };
+export const STAGE_MAP = { 不限: 0, 未融资: 801, 天使轮: 802, "A轮": 803, "B轮": 804, "C轮": 805, "D轮及以上": 806, 已上市: 807, 不需要融资: 808 };
+export const INDUSTRY_MAP = {
+	不限: 0,
+	互联网: 100020, 电子商务: 100021, 游戏: 100024, "软件/信息服务": 100032, 人工智能: 100901, 大数据: 100902,
+	云计算: 100903, 区块链: 100904, 物联网: 100905, 金融: 100101, 银行: 100102, 保险: 100103,
+	"证券/基金": 100104, 教育培训: 100200, 医疗健康: 100300, 房地产: 100400, 汽车: 100500,
+	"物流/运输": 100600, "广告/传媒": 100700, 消费品: 100800, 制造业: 101000, "能源/环保": 101100,
+	"政府/非营利": 101200, 农业: 101300,
+};
+
+/**
+ * 一份给 UI 用的筛选维度定义 —— **单一真相**。
+ *
+ * 为什么合并到这里：之前 `plugin/lib/client.js` 里手写了一组 industry 选项（只有 7 个，
+ * 少了 16 个行业），而这里是完整 23 个。UI 的 options 数组一短，用户就永远选不到
+ * 剩下的行业，而服务端其实支持。把选项列表和编码表放在同一个文件里，
+ * 两边不可能再各自漂移；`boss/contract.test.mjs` 会断言每个 option 都能在映射表里查到码。
+ *
+ * 每一项：{ key: 发给 /boss/scrape 的字段名, label: 界面上的中文, map: 编码表, options: 可选值 }
+ */
+export const FILTER_SPECS = [
+	{ key: "salary", label: "薪资", map: SALARY_MAP, options: ["3K以下", "3-5K", "5-10K", "10-15K", "15-20K", "20-30K", "30-50K", "50K以上"] },
+	{ key: "experience", label: "经验", map: EXPERIENCE_MAP, options: ["在校/应届", "1年以内", "1-3年", "3-5年", "5-10年", "10年以上"] },
+	{ key: "degree", label: "学历", map: EDUCATION_MAP, options: ["初中及以下", "中专/中技", "高中", "大专", "本科", "硕士", "博士"] },
+	{ key: "jobType", label: "类型", map: JOB_TYPE_MAP, options: ["全职", "实习", "兼职"] },
+	{ key: "industry", label: "行业", map: INDUSTRY_MAP, options: Object.keys(INDUSTRY_MAP).filter((k) => k !== "不限") },
+	{ key: "scale", label: "规模", map: SCALE_MAP, options: Object.keys(SCALE_MAP).filter((k) => k !== "不限") },
+	{ key: "stage", label: "融资", map: STAGE_MAP, options: Object.keys(STAGE_MAP).filter((k) => k !== "不限") },
+];
+/** 中文标签 → 服务端参数码；查不到就原样返回（好让调用方能报错而不是静默发错值）。 */
+export const filterCode = (map, value) => (value === null || value === undefined || value === "" ? null : map[value] ?? value);
 //#endregion

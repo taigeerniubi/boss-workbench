@@ -1,5 +1,7 @@
 # Boss 直聘工作台 — 设计草案 v0.1
 
+> **2026-09-18 实现说明：** 本文保留早期探索与界面决策记录；其中“HTTP 二维码登录、独立无头 profile、登录后 Node 直连接口、简历/会话仍是占位”等描述已被当前实现取代。现行架构与操作边界以 [`README.md`](README.md) 和 `boss/browser-channel.mjs` 为准：复用现有 Chrome/CDP、会话内同源请求、按需 JD、低频监听、结构化简历微调与会话回复建议。
+
 > 状态：**待讨论**。状态机与布局是本文主体；标注 ❓ 的是需要你拍板的开放问题。
 > 技术底座已验证：右侧栏 tab 注册表、`main` 全屏面板席位、`shell.overlay` 悬浮层全部可用，且 `sidebar.panellist` 当前零占用。
 
@@ -302,10 +304,10 @@ Boss 直聘主动检测自动化。**批量自动打招呼最大的风险不是�
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **0. 打通** | 最小 out-of-tree 客户端插件，注册 `sidebar.panellist` + `main` + `shell.overlay` | ✅ 已完成，已装入 profile |
-| **1. 读** | 数据 schema + 宿主半边读写 + 三栏渲染（当前为假数据） | 下一步 |
-| **2. 编排** | 每 JD 建/绑 DSH 会话，派发定制任务，回填状态 | API 已确认可用 |
-| **3. 自动化** | 破墙 → 抓取 → 发送 → 上传 → 回复轮询 | **卡在 5.4 的判定性问题** |
-| **4. 提醒** | toast + 未读 | 骨架已就位 |
+| **1. 读** | 数据 schema + 宿主半边读写 + 三栏渲染 | ✅ 已完成：列表跟着 `data/jobs.json` 走，`/boss/state` 一次给全 |
+| **2. 编排** | 每个 JD 的简历润色 / 会话读取 / 回复草稿 | ✅ 已完成（规则版，不是派 DSH 会话） |
+| **3. 自动化** | 搜索/筛选 → JD → 会话 → 发送 | ✅ 已接通：发送走 MQTT（`boss/mqtt-chat.mjs`）；**不做**附件简历上传 |
+| **4. 提醒** | toast + 未读 | ⚠️ 骨架仍是硬编码演示数据，见 §16.7 |
 
 ---
 
@@ -1035,8 +1037,8 @@ Boss 要的不是"你登录了没有"，而是"这个请求是不是它自己的
 
 | 做法 | 脚本 | 状态 |
 |---|---|---|
-| 截页面自己发的 joblist | `boss/browser-search.mjs` | ✅ 能用，但先要过验证墙 |
-| 撞 37 时自动改走浏览器 | `runScrape` 的 `browserFallback` | ✅ 已接 |
+| 截页面自己发的 joblist | `boss/browser-search.mjs` | ❌ 已废弃：它自己 `openSession()` 开独立 profile，违反"复用真实 Chrome"这条红线；已不在插件可达路径里 |
+| 撞 37 时自动改走浏览器 | —— | ❌ **不存在**。这一行曾经写着"`runScrape` 的 `browserFallback` ✅ 已接"，但 `boss/jobs.mjs` 里从来没有这个符号，`runScrape` 一直是单通道。风控响应是终止态：不重试、不换通道（README「风控策略」也是这么写的）。此处以代码为准 |
 
 ### 14.6 现在真正的拦路虎：`verify.html`
 
@@ -1123,6 +1125,124 @@ README 里已经加了醒目提示，并给了不依赖 cwd 的 `node <绝对路
 | `smoke.mjs` §15（9 条：有/无会话、忙碌态、成功文案、失败变红、reloadKey） | ✅ 全过 |
 | `boss/logout.mjs` | ✅ 语法与依赖检查通过（**没有真跑** —— 用户现在是登录态，不该被我们退掉） |
 | `POST /boss/logout` 路由 | ⚠️ 未在运行时验证（宿主半边要重启 GUI） |
+
+---
+
+## 16. 协议对齐：把"看着像能用"换成"接口真的对"
+
+这一轮做的是**核对**，不是加功能。起因是发现之前几处"实现了"其实是参数名写错 ——
+代码不报错、测试也过，只是永远返回空数据，表现成"Boss 今天没岗位""这个会话没人聊过"。
+
+参考两个已在真实账号跑通的项目：`D:\boss-agent-cli`（Python）和
+[DuanXiaoWen/zhipin-geek](https://github.com/DuanXiaoWen/zhipin-geek)（求职端 CLI）。
+**只搬协议与流程，不 import、不 copy 它们的代码。**
+
+### 16.1 修掉的六个真 bug
+
+| # | 原来 | 现在 | 后果（原来） |
+|---|---|---|---|
+| 1 | `historyMsg` 带 `friendId` / `page` | `gid` / `c` / `src=0` / `securityId`，翻页用 `maxMsgId` | 请求参数全错，历史消息永远空 |
+| 2 | `getBossData` 的响应只认 `zpData.securityId` | 先取 `zpData.data`，再退回 `zpData` | 拿不到 `securityId` → 历史消息直接失败 |
+| 3 | `userLastMsg` 一次塞进最多 100 个 `friendIds` | 每批 ≤20，分批请求 | 接口按 20 截断，第 20 个之后的会话永远没有"最近消息" |
+| 4 | 靠"第一条消息的 fromId"猜我是谁 | 用 `userLastMsg` 响应里的 `uid`（永远是"我"） | 方向判断会反，把"我发的"当成"要我回" |
+| 5 | 打招呼 `GET ?securityId=&jobId=`，**丢掉 greeting** | `POST` form：`securityId` + `jobId` + `lid` + `greeting` | 用户在输入框里改的话术从来没进过请求体 |
+| 6 | 薪资 7 档（`10-20K`→405 等）、经验 `1-3年`→103 | 薪资 8 档 401–408、经验 `1-3年`→102 / `3-5年`→103、学历补 206/208/209 | 筛选看着生效、其实筛错档位 |
+
+`boss/contract.test.mjs` 就是这六条（加上后面几节）的护栏：断言路径、参数名、字段名、
+每个筛选码，以及 MQTT/Protobuf 的字节布局。**参数名记错这类 bug 只会在实机上表现为空数据，
+所以必须用契约测试钉住。**
+
+### 16.2 筛选下拉之前是死的
+
+`client.js` 的 `jobMatches()` 签名里根本没有 `jobFilters` —— 七个下拉框只写进 `remote`，
+没人读。所以"选了行业"对列表没有任何影响。
+
+- `jobMatches` 现在接收并真的判定七个维度；
+- 行业下拉项**从宿主的 `FILTER_SPECS` 拿**（`/boss/state` 下发），不再在客户端手写 ——
+  之前客户端只列了 7 个行业，宿主字典里却有 23 个，剩下 16 个用户永远选不到。
+- 语义刻意偏保守："岗位没给这个字段 → 放行"，缺字段就筛掉在实机上等于整页筛空。
+- 薪资按**起薪落在所选档位内**判，不用区间相交（Boss 的档位相邻，相交会让 25-40K
+  同时命中 20-30K 和 30-50K，等于没筛）。
+- 距离是**本地**筛的（服务端没有 `maxKm` 参数）：`runScrape` 现在真的过一遍 `filterJobs`，
+  并把"被距离筛掉多少"如实报出来。
+
+### 16.3 发消息：求职端没有 HTTP 接口
+
+两个参考项目都印证：求职端**不存在**发消息的 HTTP 端点。唯一跑通的路径是 MQTT over WSS：
+
+```text
+wss://ws6.zhipin.com:443/chatws   topic "chat"，QoS 1，retain=false
+username = getUserInfo.token + "|0"       password = /wapi/zppassport/get/wt → wt2
+WS 头     Origin + 全部 Cookie（缺 Cookie 连 101 升级都拿不到）
+载荷      手写 Protobuf TechwolfChatProtocol
+          ChatProtocol{type=1, messages=3}
+          Message{from=1,to=2,type=3,mid=4,cmid=11,body=6}  User{uid=1,name=2,source=7}
+          Body{type=1,templateId=2,text=3}
+```
+
+`boss/mqtt-chat.mjs` 用 Node 自带的 `WebSocket` 写了最小 MQTT 客户端（CONNECT/PUBLISH/
+PINGREQ/DISCONNECT）+ 这份 schema 的 Protobuf 编码器。**没有引入 mqtt.js / paho** ——
+少一个运行时依赖，也少一层"包升级把协议改坏"的风险。
+
+三个刻意的决定，与参考实现不同：
+
+1. `WS_SERVERS` 三个域名**依次真试**（参考实现列了三个却只用第一个）；
+2. 载荷里的 `mid`/`cmid` 是客户端临时号（`Date.now()`），注释里写清楚它不是服务端消息号；
+3. 鉴权失败（CONNACK 4/5）**不换域名、不重试** —— 换域名对鉴权失败没有意义，
+   只会多制造两次连接。
+
+### 16.4 发送的三层闸门（账号存活机制，不是可选装饰）
+
+1. UI 点「发送给 Boss」后还要过一次 `confirm`；
+2. 请求体必须显式带 `confirm: true`，否则 `/boss/messages/reply` 返回 **428**；
+3. 宿主侧：3 秒最小间隔 + 2 分钟内同内容去重，流水写 `data/sent-messages.json`。
+
+而且**发送失败不重试** —— MQTT 重发在 Boss 眼里就是连发两条。
+
+另外修了一个自己写出来的坑：`recordSentMessage` 写在"消息已经发出去之后"，
+它失败（磁盘权限等）**绝不能把结果翻成失败**，否则用户以为没发出去 → 重发 → 真的发两条。
+现在只标 `logged: false`，`ok` 保持 `true`。
+
+### 16.5 UI 上不再有假成功
+
+`applyAction` 的 `send`/`retry` 以前是 `setTimeout(…, 900)` 直接把状态推成
+"简历与打招呼语已发送"，一个请求都没发；而插件里根本没有上传简历附件的代码。现在：
+
+- `send` / `retry` → `POST /boss/greet/send`（真的发，且发的是输入框里那段话）；
+- `reply` → 读取当前岗位会话并生成建议（**不自动发**）；
+- 打招呼的 textarea 从 `defaultValue` 改成受控 —— 不改的话用户输入永远进不了请求体；
+- `STATE_NOTE` / `sending` 文案改成只说真发生的事，并明确"不会替你上传附件简历"。
+
+### 16.6 简历润色：给出 before → after
+
+`tailorStructuredResume` 除了重排技能和经历，现在返回 `polishedSections`
+（技能 / 个人摘要 / 经历要点各一段，都带 `original` 与 `polished`）、
+`generalSuggestions`、`keywordAdditions`。界面上逐段显示"原：… 改：…"，
+这样你能核对它到底改了哪几句，而不是只看到一句"已按 JD 优化"。
+
+**规则版不等于 AI 版**：它只重排和重写已有事实，绝不新增技能。JD 要求但简历没有证据的
+技能进 `gaps`，并在界面上标红"不应写进简历"。要做真正的语义润色，得把
+`tailorStructuredResume` 换成派 DSH 会话（§6 阶段 2 原本的设想），接口已经留好了。
+
+### 16.7 还没做的（诚实清单）
+
+| 项 | 状态 |
+|---|---|
+| 附件简历上传 | ❌ 没有实现，界面已改成不宣称会做 |
+| toast 里的三条提醒 | ❌ 仍是硬编码演示数据，动作按钮点了只会关掉自己 |
+| 距离数据源 | ⚠️ `data/geo.json` 与 `profile.homeGeo` 没有任何写入路径；距离只能来自 Boss 返回值，否则显示"距离未知"，此时选距离档会筛空 |
+| 状态机持久化 | ⚠️ 状态在内存里，刷新页面回到"待处理" |
+| 自动回复轮询 | ❌ 有意不做：新消息只能靠重新拉 `userLastMsg`（MQTT 只发不收），自动轮询是风控暴露最大的一种行为 |
+| 简历润色接 LLM | ❌ 目前是规则版 |
+
+### 16.8 验证状态
+
+| 项 | 状态 |
+|---|---|
+| `npm test`（smoke + ported-flow + contract + parse + imports） | ✅ 全过 |
+| `boss/contract.test.mjs` | ✅ 35 项，含 MQTT/Protobuf 字节级断言（用假 WebSocket，不连网） |
+| `smoke.mjs` 新增的筛选回归（14 条） | ✅ 全过 |
+| 真实 Boss 账号 | ⚠️ **这一轮一次都没跑**（按用户要求）。所有线上行为都只做了离线契约与假 transport 验证 |
 
 
 

@@ -301,21 +301,80 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 		];
 
 		/**
-		 * 抓取条件（城市 / 岗位关键词 / 距离）与状态筛选合成后的判定。
+		 * 抓取条件（城市 / 岗位关键词 / 距离 / 七个 Boss 维度）与状态筛选合成后的判定。
 		 * 和 boss/lib.mjs 里的 filterJobs 是同一套语义：那边给 agent 读，
 		 * 这边给 UI 用；两边一起改，别让"看到什么"和"agent 拿到什么"分叉。
+		 *
+		 * ⚠️ 之前这里的 `jobFilters` 参数根本不存在 —— 七个下拉框只写进了 remote，
+		 * 没人读，于是"选了行业"看起来没反应。筛选项必须在这里真的参与判定。
 		 */
-		function jobMatches(app, { filter = null, city = null, kw = "", maxKm = null } = {}) {
+		function jobMatches(app, { filter = null, city = null, kw = "", maxKm = null, jobFilters = {} } = {}) {
 			if (!matchFilter(filter)(app)) return false;
 			if (city !== null && app.city !== city) return false;
 			// 距离筛选会把"距离未知"的同城岗位一起筛掉 —— 宁缺勿错
 			if (maxKm !== null && (app.distanceKm === null || app.distanceKm > maxKm)) return false;
+			// 七个维度：抓取时已经按服务端筛过一遍，这里再按**本地字段**复核一次。
+			//
+			// 两条语义，都是"没证据就别筛掉"：
+			//   1. 岗位这条**没给**这个字段（老数据 / 推荐流没返回规模）→ 放行，别误杀；
+			//   2. 岗位给了值 → 必须真的命中。
+			// 反过来（缺字段就筛掉）在实机上表现为"选了规模，整页全空"。
+			if (jobFilters.salary && !salaryInRange(app.salary, jobFilters.salary)) return false;			if (jobFilters.experience && app.experienceName && !labelMatches(jobFilters.experience, app.experienceName)) return false;
+			if (jobFilters.degree && app.degreeName && !labelMatches(jobFilters.degree, app.degreeName)) return false;
+			if (jobFilters.jobType && app.jobType && !labelMatches(jobFilters.jobType, app.jobType)) return false;
+			if (jobFilters.industry && app.industry && !labelMatches(jobFilters.industry, app.industry)) return false;
+			if (jobFilters.scale && app.scale && !labelMatches(jobFilters.scale, app.scale)) return false;
+			if (jobFilters.stage && app.stage && !labelMatches(jobFilters.stage, app.stage)) return false;
 			const needle = kw.trim().toLowerCase();
 			if (needle !== "") {
 				const hay = `${app.company} ${app.title} ${app.jd} ${app.area ?? ""} ${app.industry ?? ""}`.toLowerCase();
 				if (!hay.includes(needle)) return false;
 			}
 			return true;
+		}
+
+		/** 薪资档位 → [下限, 上限]（单位 K，null = 无界）。用来把岗位的"20-40K"塞进用户选的档位。 */
+		const SALARY_BANDS = {
+			"3K以下": [null, 3], "3-5K": [3, 5], "5-10K": [5, 10], "10-15K": [10, 15],
+			"15-20K": [15, 20], "20-30K": [20, 30], "30-50K": [30, 50], "50K以上": [50, null],
+		};
+		/**
+		 * 薪资筛选：**岗位薪资下限必须落在用户选的档位里**。
+		 *
+		 * 为什么不是"区间相交"：Boss 的档位是相邻的（20-30K 与 30-50K 共享端点），
+		 * 而岗位写的是实际区间（"25-40K"）—— 用相交判，25-40K 会同时命中
+		 * 20-30K 和 30-50K，等于选什么都没筛掉，下拉框又变成摆设。
+		 *
+		 * 也不用"岗位下限 ≥ 档位下限"：那样选 20-30K 会把 20-30K 的岗位自己筛掉。
+		 *
+		 * 现在的语义干净且可预测：
+		 *   岗位 20-30K → 下限 20，落在 [20,30] → 命中「20-30K」
+		 *   岗位 25-40K → 下限 25，落在 [20,30] → 命中「20-30K」（起薪确实在这个区间）
+		 *   岗位 30-50K → 下限 30，超出 [20,30] 的上界 → 不命中「20-30K」，命中「30-50K」
+		 * 解析不出数字（"面议"）时**放行** —— 没有证据就别筛掉，服务端已经筛过一轮了。
+		 */
+		function salaryInRange(text, label) {
+			const band = SALARY_BANDS[label];
+			if (band === undefined) return true;
+			const numbers = String(text ?? "").match(/\d+(?:\.\d+)?/gu);
+			if (numbers === null || numbers.length === 0) return true;
+			const low = Number(numbers[0]);
+			const [bandLow, bandHigh] = band;
+			if (bandLow !== null && low < bandLow) return false;
+			if (bandHigh !== null && low > bandHigh) return false;
+			return true;
+		}
+
+		/**
+		 * 一个筛选项标签 vs 岗位上的原值：宽松匹配。
+		 * 「3-5年」要能匹配到「3-5年」，也要能匹配到「经验不限」之外的写法；
+		 * 只要岗位值里**含有**标签（或反过来），就算命中。
+		 */
+		function labelMatches(label, value) {
+			if (!label || label === "不限") return true;
+			const a = String(label);
+			const b = String(value ?? "");
+			return b === a || b.includes(a) || a.includes(b);
 		}
 
 		/** 卡片右侧那一格：同城给距离，异地给"异地"，同城没坐标给"距离未知"。 */
@@ -334,13 +393,13 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 		 * 一个主行动，其余状态只有说明 —— 这样"点一个状态"永远有下一步。
 		 */
 		const STATE_NOTE = {
-			new: ["", "新抓到的岗位。给它选一份简历，再派 agent 按 JD 定制。"],
-			preparing: ["Busy", "agent 正在按 JD 改简历、写话术；交付后会停下来等你确认。"],
-			review: ["Warn", "简历与话术已就绪。发送前由你按确认 —— 这是自动化误发的保险丝。"],
-			sending: ["Busy", "自动化正在发送简历并上传附件，稍等几秒。"],
+			new: ["", "新抓到的岗位。先选一份简历，再按 JD 润色简历与话术。"],
+			preparing: ["Busy", "正在按 JD 润色结构化简历；做完会停下来等你确认。"],
+			review: ["Warn", "简历润色结果与话术已就绪。发送前由你按确认 —— 这是自动化误发的保险丝。"],
+			sending: ["Busy", "正在把打招呼语发给对方，稍等几秒。"],
 			sent: ["", "已送达，等招聘者回复。对方回话会推到提醒里。"],
 			replied: ["Ok", "招聘者回复了你。回复率随时间衰减，建议尽快回话。"],
-			failed: ["Bad", "发送失败，常见原因是登录态失效或页面选择器变化。重试或人工兜底。"],
+			failed: ["Bad", "发送失败，常见原因是登录态失效或撞了风控。看清楚原因再决定要不要重试。"],
 			skipped: ["Muted", "你跳过了这个岗位，已归档。"],
 		};
 
@@ -351,7 +410,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			replied: { label: "去回话 ▸", run: "reply" },
 		};
 
-		/** 本地简历库（假数据）：让「换」真的有下一份可换。 */
+		/** 本地简历库（演示兜底）：宿主还没起来时「换」也有下一份可换。 */
 		const RESUMES = ["后端_通用_v2.pdf", "后端_中科智联_v3.pdf", "全栈_通用_v1.pdf", "Go后端_启明_v2.pdf"];
 
 		/** 点击产生的每个状态迁移都补一条"刚刚"的时间线。 */
@@ -467,12 +526,22 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					sameCity: city === homeCity,
 					hr: j.hr || "",
 					industry: j.industry || "",
+					// 展示用：经验和学历拼一行
 					experience: [j.experience, j.degree].filter(Boolean).join(" · "),
+					// 筛选用：各自留一份原值。七个下拉框要按字段比对，
+					// 拿拼好的展示串去比会永远筛不出东西。
+					experienceName: j.experience || "",
+					degreeName: j.degree || "",
+					jobType: j.jobType || "",
+					scale: j.scale || "",
+					stage: j.stage || "",
 					jd: j.jd || "",
 					url: j.url || "",
 					securityId: j.securityId || "",
 					encryptJobId: j.encryptJobId || "",
+					lid: j.lid || "",
 					scrapedAt: j.scrapedAt ?? null,
+					detailFetchedAt: j.detailFetchedAt ?? null,
 					// 状态机那一半：有旧的就接着走，没有就从"待处理"起
 					status: old?.status ?? "new",
 					resume: old?.resume ?? "",
@@ -571,8 +640,8 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 		//#endregion
 
 		//#region 第 ① 栏：JD 队列
-		function QueueColumn({ apps, selectedId, onPick, onPickStatus, filter, onClearFilter, city, kw, maxKm, onClearQuery, onScrape, scraping, hasReal, canScrape, coldActive }) {
-			const visible = apps.filter((a) => jobMatches(a, { filter, city, kw, maxKm }));
+		function QueueColumn({ apps, selectedId, onPick, onPickStatus, filter, onClearFilter, city, kw, maxKm, jobFilters, onClearQuery, onScrape, scraping, hasReal, canScrape, coldActive }) {
+			const visible = apps.filter((a) => jobMatches(a, { filter, city, kw, maxKm, jobFilters }));
 			const groups = GROUPS.map((g) => ({ g, items: visible.filter(g.match).sort(byUrgency) })).filter((x) => x.items.length > 0);
 			const tag = labelFilter(filter);
 			// 抓取条件也做成可清除的标签，否则"筛空了"会让人以为是没抓到岗位
@@ -667,10 +736,15 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 		 * 底部常驻一条说明带 + 一个主行动 —— 状态要你做什么永远在视野里，
 		 * 不用滚到底才找得到；点下去真的推进状态机。
 		 */
-		function DetailColumn({ app, focusAction, onAct, resumeName }) {
+		function DetailColumn({ app, focusAction, onAct, resumeName, onFetchDetail, detailLoading, assistant, onConversation, remote, replyText, onReplyText, onSendReply, greetText, onGreetText, onGenerateGreeting, onSendGreeting }) {
 			if (!app) return h("div", { className: "bw_col bw_colMid" }, h(ColHead, null, "当前 JD"), h(Empty, null, "从左边选一个岗位"));
 			const note = STATE_NOTE[app.status];
 			const primary = PRIMARY[app.status];
+			const assist = assistant?.jobId === app.id ? assistant : null;
+			// 发送/打招呼的状态挂在 remote 上，由 WorkbenchPage 传进来
+			// （这一层刻意不新增 useState，避免打乱 smoke.mjs 依赖的 hook 序号）。
+			const sending = remote?.assistant?.jobId === app.id && remote?.assistant?.sending === true;
+			const greet = remote?.greet?.jobId === app.id ? remote.greet : null;
 			return h(
 				"div",
 				{ className: "bw_col bw_colMid" },
@@ -692,8 +766,16 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 						h(
 							"div",
 							{ className: "bw_sect" },
-							h("div", { className: "bw_sectHead" }, h("span", null, "JD 全文")),
-							h("div", { className: "bw_jd" }, app.jd),
+							h(
+								"div",
+								{ className: "bw_sectHead" },
+								h("span", null, "JD 全文"),
+								h("span", { className: "bw_spacer" }),
+								app.real && !app.jd
+									? h("button", { type: "button", className: "bw_btn", disabled: detailLoading, onClick: () => onFetchDetail?.(app.id) }, detailLoading ? "获取中…" : "获取完整 JD")
+									: null,
+							),
+							h("div", { className: "bw_jd" }, app.jd || (app.real ? "列表接口没有返回 JD。为保护账号，不会批量补全；请点上方按钮只取这一条。" : "")),
 						),
 						h(
 							"div",
@@ -711,14 +793,99 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 								h("span", { className: "bw_pickFile" }, h("span", null, "📄"), h("span", { className: "bw_pickName" }, resumeName ?? app.resume ?? "尚未选择")),
 								h("span", { className: "bw_pickNote" }, (resumeName ?? app.resume) ? "已就绪" : "待选"),
 								h("button", { type: "button", className: "bw_btn", onClick: () => onAct(app.id, "swapResume") }, "换"),
-								h("button", { type: "button", className: "bw_btn", onClick: () => onAct(app.id, "regenerate") }, "让 agent 按 JD 改"),
+								h("button", { type: "button", className: "bw_btn", disabled: !app.jd || assist?.running === true, onClick: () => onAct(app.id, "regenerate") }, assist?.running && assist?.action === "tailor" ? "微调中…" : "按 JD 微调"),
 							),
+						),
+						assist?.tailored
+							? h(
+									"div",
+									{ className: "bw_sect" },
+									h("div", { className: "bw_sectHead" }, h("span", null, "简历润色结果"), h("span", { className: "bw_spacer" }), h("span", { className: "bw_chip" }, "不改原文件")),
+									h("div", { className: "bw_jd" }, assist.tailored.resume?.summary ?? ""),
+									h("div", { className: "bw_dSub" }, "技能顺序：" + String((assist.tailored.resume?.skills ?? []).join(" · "))),
+									// 逐段 before → after：只说"已优化"没法核对，得看见改了哪几句。
+									...(assist.tailored.polishedSections ?? [])
+										.filter((section) => section.original !== section.polished)
+										.map((section, i) =>
+											h(
+												"div",
+												{ key: "polish" + String(i) },
+												h("div", { className: "bw_dSub" }, "【" + section.section + "】" + (section.changes ?? []).join("；")),
+												h("div", { className: "bw_jd" }, "原：" + (section.original || "（空）") + "\n改：" + (section.polished || "（空）")),
+											),
+										),
+									...(assist.tailored.changes ?? []).map((text, i) => h("div", { className: "bw_dSub", key: "change" + String(i) }, "• " + text)),
+									...(assist.tailored.keywordAdditions?.length ? [h("div", { className: "bw_pick", key: "kwAdd" }, h("span", { className: "bw_pickNote" }, "命中的 JD 关键词"), h("span", { className: "bw_pickName" }, (assist.tailored.keywordAdditions ?? []).join("、")))] : []),
+									...(assist.tailored.generalSuggestions ?? []).map((text, i) => h("div", { className: "bw_dSub", key: "sugg" + String(i) }, "→ " + text)),
+									...(assist.tailored.warnings ?? []).map((text, i) => h("div", { className: "bw_note bw_noteDanger", key: "warn" + String(i) }, text)),
+								)
+							: null,
+						h(
+							"div",
+							{ className: "bw_sect" },
+							h("div", { className: "bw_sectHead" }, h("span", null, "当前岗位会话与回复"), h("span", { className: "bw_spacer" }), h("button", { type: "button", className: "bw_btn", disabled: assist?.running === true, onClick: () => onConversation?.(app.id) }, assist?.running && assist?.action === "conversation" ? "读取中…" : "读取会话并生成建议")),
+							assist?.conversation?.messages?.length
+								? h("div", { className: "bw_jd" }, assist.conversation.messages.slice(-8).map((message) => `${message.direction === "incoming" ? "Boss" : "我"}：${message.text}`).join("\n"))
+								: h("div", { className: "bw_dSub" }, "不会自动读取；点击后才获取当前岗位会话。"),
+							...(assist?.reply?.drafts ?? []).map((draft, i) => h("div", { className: "bw_pick", key: "reply" + String(i) }, h("span", { className: "bw_pickNote" }, draft.style), h("span", { className: "bw_pickName" }, draft.text), h("button", { type: "button", className: "bw_btn", onClick: () => navigator.clipboard?.writeText(draft.text) }, "复制"))),
+							// ── 真正把回复发出去 ────────────────────────────────────
+							// 求职端没有发消息的 HTTP 接口，宿主走 MQTT（boss/mqtt-chat.mjs）。
+							// 草稿不会自动发：必须点「发送给 Boss」再确认一次。
+							assist?.conversation?.thread?.friendId
+								? h(
+										"div",
+										null,
+										h("textarea", {
+											className: "bw_ta",
+											value: replyText ?? (assist?.reply?.drafts?.[0]?.text ?? ""),
+											placeholder: "要发给这位 Boss 的话",
+											onChange: (e) => onReplyText?.(e.target.value),
+										}),
+										h(
+											"div",
+											{ className: "bw_pick" },
+											h("span", { className: "bw_pickNote" }, "发给 " + (assist.conversation.thread.bossName || assist.conversation.thread.company || "这位 Boss")),
+											h("span", { className: "bw_pickName" }, "#" + String(assist.conversation.thread.friendId)),
+											h(
+												"button",
+												{
+													type: "button",
+													className: "bw_btn bw_btnPrimary",
+													disabled: sending === true || (replyText ?? "").trim() === "" && !(assist?.reply?.drafts?.[0]?.text ?? "").trim(),
+													onClick: () => onSendReply?.(app.id, assist.conversation.thread.friendId, replyText || assist?.reply?.drafts?.[0]?.text || ""),
+												},
+												sending === true ? "发送中…" : "发送给 Boss ▸",
+											),
+										),
+										h("div", { className: "bw_dSub" }, "发送走 MQTT；宿主会拦掉 3 秒内的连发和 2 分钟内的同内容重发。"),
+									)
+								: null,
+							assist?.sent ? h("div", { className: "bw_note" }, "已发送：" + assist.sent.text) : null,
+							assist?.sendError ? h("div", { className: "bw_note bw_noteDanger" }, assist.sendError) : null,
+							assist?.error ? h("div", { className: "bw_note bw_noteDanger" }, assist.error) : null,
 						),
 						h(
 							"div",
 							{ className: "bw_sect" },
-							h("div", { className: "bw_sectHead" }, h("span", null, "打招呼语")),
-							h("textarea", { className: "bw_ta", defaultValue: app.greeting, placeholder: "还没有生成打招呼语" }),
+							h(
+								"div",
+								{ className: "bw_sectHead" },
+								h("span", null, "打招呼语"),
+								h("span", { className: "bw_spacer" }),
+								h("button", { type: "button", className: "bw_btn", disabled: greet?.running === true, onClick: () => onGenerateGreeting?.(app.id) }, greet?.running === true ? "生成中…" : "生成话术"),
+								h("button", { type: "button", className: "bw_btn bw_btnPrimary", disabled: greet?.running === true || !app.securityId, onClick: () => onSendGreeting?.(app.id, greetText ?? app.greeting) }, "发送打招呼 ▸"),
+							),
+							// 受控 textarea：之前这里是 defaultValue 且没有 onChange，
+							// 用户改的字**永远进不了请求体**，发出去的永远是服务端默认招呼语。
+							h("textarea", {
+								className: "bw_ta",
+								value: greetText ?? app.greeting,
+								placeholder: "还没有生成打招呼语（点右上角「生成话术」）",
+								onChange: (e) => onGreetText?.(e.target.value),
+							}),
+							!app.securityId ? h("div", { className: "bw_dSub bw_noteDanger" }, "这条岗位没有 securityId，无法打招呼；重新抓一次岗位列表即可。") : null,
+							greet?.error ? h("div", { className: "bw_dSub bw_noteDanger" }, greet.error) : null,
+							greet?.ok === true ? h("div", { className: "bw_dSub" }, "打招呼已发出（不含附件简历 —— 插件不会替你上传简历附件）") : null,
 						),
 					),
 				),
@@ -823,22 +990,25 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 
 		//#region 登录闸门（进工作台时没登录就先弹二维码）
 		const PHASE_TEXT = {
-			idle: ["正在取二维码…", "wait"],
-			"waiting-scan": ["请用 Boss 直聘 APP 扫码", "hot"],
-			"waiting-confirm": ["已扫码 —— 请在手机上点「确认登录」", "hot"],
-			finalizing: ["正在完成安全验证…", "wait"],
+			idle: ["正在连接 Chrome…", "wait"],
+			"connecting-browser": ["正在连接 Chrome…", "wait"],
+			"waiting-browser": ["请在 Chrome 的 Boss 标签中登录", "hot"],
+			verifying: ["正在用当前页面校验登录态…", "wait"],
 			"logged-in": ["登录成功", "ok"],
-			// "拿到 cookie 了但 Boss 不认" —— 和"扫码没扫上"是两回事，必须分开说
-			uncertain: ["二维码确认了，但登录态没生效", "bad"],
-			flagged: ["当前 IP 被风控（code 35）", "bad"],
-			expired: ["二维码已过期", "bad"],
+			"browser-unavailable": ["没有找到可复用的 Chrome 会话", "bad"],
+			"ip-risk": ["当前 IP 被风控（code 35）", "bad"],
+			"account-risk": ["账号触发风控（code 36）", "bad"],
+			"environment-risk": ["浏览器环境触发风控（code 37）", "bad"],
+			"browser-blocked": ["Boss 拦截了当前页面", "bad"],
+			"rate-limited": ["请求过快，已停止", "bad"],
+			expired: ["等待登录超时", "bad"],
 			failed: ["登录失败", "bad"],
 		};
 
 		/**
 		 * 工作台的登录闸门。
-		 * 流程完全走宿主路由：/boss/login/state 判断 → /boss/login/start 取码 →
-		 * /boss/login/status 每 2 秒推进一步（扫码 → 手机确认 → 安全验证）。
+		 * 流程完全走宿主路由：先连接用户现有 Chrome，再观察其中的 Boss cookie；
+		 * 登录完成后只做一次同页校验，不再由 Node 申请二维码或启动无头浏览器。
 		 *
 		 * 独立成组件（而不是塞进 WorkbenchPage），这样 WorkbenchPage 的 hook 序号不变，
 		 * 测试里那些按序号驱动的用例不会被我改坏。
@@ -885,7 +1055,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			// 开着的时候每 2 秒推进一步
 			react.useEffect(() => {
 				if (!gate.open) return;
-				if (gate.phase === "logged-in" || gate.phase === "uncertain" || gate.phase === "flagged" || gate.phase === "expired" || gate.phase === "failed") return;
+				if (gate.phase === "logged-in" || ["browser-unavailable", "ip-risk", "account-risk", "environment-risk", "browser-blocked", "rate-limited", "expired", "failed"].includes(gate.phase)) return;
 				const id = setInterval(async () => {
 					try {
 						const s = await fetch("/boss/login/status", { credentials: "same-origin" }).then((r) => r.json());
@@ -902,20 +1072,20 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			if (!gate.open || dismissed) return null;
 			const [text, tone] = PHASE_TEXT[gate.phase] ?? [gate.phase, ""];
 			const spinning = tone === "wait";
-			const dead = gate.phase === "uncertain" || gate.phase === "flagged" || gate.phase === "expired" || gate.phase === "failed";
+			const dead = ["browser-unavailable", "ip-risk", "account-risk", "environment-risk", "browser-blocked", "rate-limited", "expired", "failed"].includes(gate.phase);
 			return h(
 				"div",
 				{ className: "bw_gate" },
 				h(
 					"div",
 					{ className: "bw_gateCard" },
-					h("div", { className: "bw_gateTitle" }, gate.phase === "logged-in" ? "已登录 Boss 直聘" : "先登录 Boss 直聘"),
-					h("div", { className: "bw_gateSub" }, gate.phase === "logged-in" ? "抓取与打招呼都需要登录态，已经可以用了。" : "登录一次就够了，凭证存在宿主侧，之后抓取不再需要浏览器。"),
+					h("div", { className: "bw_gateTitle" }, gate.phase === "logged-in" ? "已绑定 Boss 浏览器会话" : "连接真实 Chrome 登录 Boss"),
+					h("div", { className: "bw_gateSub" }, gate.phase === "logged-in" ? "搜索、JD 和监听都会复用这个页面，不会另开无头浏览器。" : "先用 --remote-debugging-port=9222 启动 Chrome，再在该 Chrome 中打开并登录 Boss。插件不会伪造机器指纹。"),
 					h(
 						"div",
 						{ className: "bw_gateQr" },
 						gate.qr === null
-							? h("span", { className: "bw_gateSub" }, dead ? "没有二维码" : "二维码获取中…")
+							? h("span", { className: "bw_gateSub" }, dead ? "连接未建立" : "请在真实 Chrome 标签中完成扫码或手机确认")
 							: h("img", { className: "bw_gateQrImg", src: gate.qr, alt: "Boss 登录二维码" }),
 					),
 					h("div", { className: "bw_gatePhase bw_gate" + (tone === "" ? "" : tone.charAt(0).toUpperCase() + tone.slice(1)) }, spinning ? h("span", { className: "bw_spin" }) : null, text),
@@ -939,7 +1109,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 											setGate({ open: true, qr: again?.qr ?? null, phase: again?.phase ?? "failed", error: again?.error ?? "取二维码失败", detail: again?.detail ?? null });
 										},
 									},
-									"重新获取二维码",
+									"重新连接 Chrome",
 								)
 							: null,
 						gate.phase === "logged-in"
@@ -1221,6 +1391,9 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			const [selectedResume, setSelectedResume] = react.useState(null);
 			const [libCollapsed, setLibCollapsed] = react.useState(false);
 			const [uploads, setUploads] = react.useState([]);
+			// 本地假定时器在 §16.5 之后已经没有了（所有动作都走真请求），
+			// 但这个 ref + cleanup 留着：子组件的 effect 也可能登记进来的东西，
+			// 卸载时统一清掉比"等别人想起来清"安全。
 			const timers = react.useRef([]);
 			react.useEffect(() => () => timers.current.forEach(clearTimeout), []);
 			// 进页面就把宿主那份真数据拉过来（拿不到就安静地退回演示数据）
@@ -1254,14 +1427,27 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			const sentCount = apps.filter((a) => a.status === "sent").length;
 			const schedule = (fn, ms) => timers.current.push(setTimeout(fn, ms));
 
+			/**
+			 * 七个 Boss 维度的筛选项。它们既参与**本地判定**（jobMatches），
+			 * 也会跟着 /boss/scrape 发给服务端；所以 `query` 里必须带上它们，
+			 * 否则"选了行业"只会写进 state、左边列表纹丝不动。
+			 */
+			const jobFilters = remote?.jobFilters ?? {};
 			/** 抓取条件 + 状态筛选一起决定"队列里还剩谁"。 */
-			const query = { filter, city, kw, maxKm };
+			const query = { filter, city, kw, maxKm, jobFilters };
 			const shownCount = apps.filter((a) => jobMatches(a, query)).length;
-			const cityOptions = [...new Set(apps.map((a) => a.city))].sort();
+			const cityOptions = [...new Set([...Object.keys(remote?.cities ?? {}), ...apps.map((a) => a.city)])].filter(Boolean).sort();
+			const setJobFilter = (key, value) => {
+				const next = { ...jobFilters, [key]: value || null };
+				setRemote((cur) => ({ ...(cur ?? {}), jobFilters: next }));
+				refocus({ ...query, jobFilters: next });
+			};
+			/** 返回没有任何筛选时的样子（城市/关键词/距离/七个维度一起清）。 */
 			const clearQuery = () => {
 				setCity(null);
 				setKw("");
 				setMaxKm(null);
+				setRemote((cur) => ({ ...(cur ?? {}), jobFilters: {} }));
 			};
 			/** 条件变了以后，如果选中的 JD 被筛掉，把焦点交给第一条可见项。 */
 			const refocus = (next) => {
@@ -1362,7 +1548,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 				const mode = override?.mode ?? (q === "" ? "recommend" : "search");
 				const startedAt = Date.now();
 				setRemote((cur) => ({ ...(cur ?? {}), scrape: { running: true, mode, query: q, city: c, startedAt } }));
-				const j = await postJson("/boss/scrape", { mode, city: c, query: q, maxKm: km, pages: 1, pageSize: 30 });
+				const j = await postJson("/boss/scrape", { mode, city: c, query: q, maxKm: km, pages: 1, pageSize: 30, ...jobFilters });
 				const ms = Date.now() - startedAt;
 				if (j === null) {
 					setRemote((cur) => ({ ...(cur ?? {}), scrape: { running: false, mode, query: q, city: c, ms, error: "宿主半边没响应（/boss/scrape 打不通）" } }));
@@ -1386,6 +1572,112 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 				}));
 			};
 
+			// JD 只在用户明确点击时单条获取，绝不在列表加载后自动连打。
+			const fetchDetail = async (id) => {
+				if (remote?.detail?.running === true) return;
+				setRemote((cur) => ({ ...(cur ?? {}), detail: { running: true, id } }));
+				const j = await postJson("/boss/jobs/detail", { id });
+				setRemote((cur) => ({
+					...(cur ?? {}),
+					jobs: j?.jobs ?? cur?.jobs ?? [],
+					detail: { running: false, id, ok: j?.ok === true, error: j?.ok === true ? null : (j?.error ?? "JD 获取失败") },
+				}));
+			};
+
+			const tailorResume = async (id) => {
+				if (remote?.assistant?.running === true) return;
+				setRemote((cur) => ({ ...(cur ?? {}), assistant: { running: true, jobId: id, action: "tailor" } }));
+				const j = await postJson("/boss/assist/tailor-resume", { jobId: id, resumeName: selectedResume });
+				setRemote((cur) => ({ ...(cur ?? {}), assistant: { ...(cur?.assistant ?? {}), running: false, jobId: id, tailored: j?.item ?? null, error: j?.ok === true ? null : (j?.error ?? "简历微调失败") } }));
+				return j;
+			};
+
+			const loadConversationAndAdvice = async (id) => {
+				if (remote?.assistant?.running === true) return;
+				setRemote((cur) => ({ ...(cur ?? {}), assistant: { ...(cur?.assistant ?? {}), running: true, jobId: id, action: "conversation", error: null } }));
+				const conversation = await postJson("/boss/messages/for-job", { jobId: id });
+				if (conversation?.ok !== true) {
+					setRemote((cur) => ({ ...(cur ?? {}), assistant: { ...(cur?.assistant ?? {}), running: false, jobId: id, conversation: null, error: conversation?.error ?? "会话获取失败" } }));
+					return;
+				}
+				const reply = await postJson("/boss/assist/reply", { jobId: id, resumeName: selectedResume, conversation });
+				setRemote((cur) => ({
+					...(cur ?? {}),
+					assistant: { ...(cur?.assistant ?? {}), running: false, jobId: id, conversation, reply: reply?.advice ?? null, error: reply?.ok === true ? null : (reply?.error ?? "回复建议生成失败") },
+				}));
+			};
+
+			/**
+			 * 把回复真的发给 Boss。
+			 *
+			 * 三层闸门，缺一不可：
+			 *   1. 界面上必须点「发送给 Boss」，这里再弹一次 confirm（默认取消）；
+			 *   2. 请求体必须显式带 `confirm: true`，宿主缺它一律 428 拒绝；
+			 *   3. 宿主侧还有 3 秒最小间隔 + 2 分钟同内容去重。
+			 *
+			 * 复发不重试：MQTT 重发等于对 Boss 连发两条，宁可让用户自己再点一次。
+			 */
+			const sendReplyToBoss = async (id, friendId, text) => {
+				const body = String(text ?? "").trim();
+				if (body === "") return;
+				if (remote?.assistant?.sending === true) return;
+				const who = apps.find((a) => a.id === id);
+				// eslint-disable-next-line no-alert
+				if (typeof confirm === "function" && !confirm(`把这条消息发给「${who?.company ?? ""} ${who?.title ?? ""}」的 HR？\n\n${body}\n\n发出后无法撤回。`)) return;
+				setRemote((cur) => ({ ...(cur ?? {}), assistant: { ...(cur?.assistant ?? {}), jobId: id, sending: true, sendError: null, sent: null } }));
+				const j = await postJson("/boss/messages/reply", { friendId, text: body, confirm: true });
+				setRemote((cur) => ({
+					...(cur ?? {}),
+					assistant: { ...(cur?.assistant ?? {}), jobId: id, sending: false, sent: j?.ok === true ? { text: j.text, at: j.sentAt } : null, sendError: j?.ok === true ? null : (j?.error ?? "发送失败") },
+				}));
+				if (j?.ok === true) setStatus(id, "sent", "已把回复发给对方，等下一步");
+				else setStatus(id, "failed", j?.error ?? "发送失败", 1);
+			};
+
+			/** 生成打招呼话术：纯函数在宿主跑，这条路不联网。 */
+			const generateGreeting = async (id) => {
+				if (remote?.greet?.running === true) return;
+				setRemote((cur) => ({ ...(cur ?? {}), greet: { running: true, jobId: id, error: null } }));
+				const j = await postJson("/boss/greet/preview", { jobId: id, resumeName: selectedResume });
+				setRemote((cur) => ({
+					...(cur ?? {}),
+					greet: { running: false, jobId: id, ok: j?.ok === true, text: j?.greeting?.text ?? null, error: j?.ok === true ? null : (j?.error ?? "话术生成失败") },
+					greetText: j?.greeting?.text ?? cur?.greetText ?? null,
+				}));
+			};
+
+			/** 发送打招呼。`text` 就是输入框里那段 —— 必须原样发出去。 */
+			const sendGreetingNow = async (id, text) => {
+				if (remote?.greet?.running === true) return;
+				const body = String(text ?? "").trim();
+				const who = apps.find((a) => a.id === id);
+				// eslint-disable-next-line no-alert
+				if (typeof confirm === "function" && !confirm(`给「${who?.company ?? ""} ${who?.title ?? ""}」发这条打招呼？\n\n${body}\n\n（只发消息，不会替你上传附件简历。）`)) return;
+				setRemote((cur) => ({ ...(cur ?? {}), greet: { running: true, jobId: id, error: null } }));
+				const j = await postJson("/boss/greet/send", { jobId: id, text: body, resumeName: selectedResume });
+				setRemote((cur) => ({
+					...(cur ?? {}),
+					greet: { running: false, jobId: id, ok: j?.ok === true, text: body, error: j?.ok === true ? null : (j?.error ?? "打招呼失败") },
+				}));
+				if (j?.ok === true) setStatus(id, "sent", "打招呼已发出（不含附件简历）");
+				else setStatus(id, "failed", j?.error ?? "打招呼失败", 1);
+			};
+
+			// 监听没有后台高频轮询：保存条件不联网，“检查新岗位”才发一次单页搜索。
+			const saveCurrentWatch = async () => {
+				const j = await postJson("/boss/watch/save", { mode: kw.trim() === "" ? "recommend" : "search", city: city ?? homeCity, query: kw.trim(), pageSize: 30, minIntervalMinutes: 360, ...jobFilters });
+				if (j?.ok === true) setRemote((cur) => ({ ...(cur ?? {}), watch: j.watch, watchRun: { ok: true, message: "监听条件已保存；至少间隔 6 小时才能再次检查" } }));
+			};
+			const runCurrentWatch = async () => {
+				if (remote?.watchRun?.running === true || coldActive) return;
+				setRemote((cur) => ({ ...(cur ?? {}), watchRun: { running: true } }));
+				const j = await postJson("/boss/watch/run");
+				setRemote((cur) => ({
+					...(cur ?? {}), jobs: j?.jobs ?? cur?.jobs ?? [], watch: j?.watch ?? cur?.watch ?? null,
+					watchRun: { running: false, ok: j?.ok === true, newCount: j?.newCount ?? 0, error: j?.ok === true ? null : (j?.error ?? "监听检查失败") },
+				}));
+			};
+
 			// ── 退出登录 ────────────────────────────────────────────────────
 			// 刻意**不加 useState**：状态挂进已有的 remote 里，WorkbenchPage 的 hook
 			// 序号（0-10 归本组件，11 起归子组件）就不能再动了。
@@ -1394,7 +1686,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			const doLogout = async () => {
 				if (loggingOut) return;
 				// eslint-disable-next-line no-alert
-				if (typeof confirm === "function" && !confirm("退出登录？\n\n会清掉本机保存的 Boss 凭证和浏览器 cookie，下次要重新扫码。\n简历库和已抓到的岗位不动。")) return;
+				if (typeof confirm === "function" && !confirm("解除插件与 Boss 会话的绑定？\n\n只清插件保存的会话，不会退出或清理你真实 Chrome 里的 Boss。\n简历库和已抓到的岗位不动。")) return;
 				setRemote((cur) => ({ ...(cur ?? {}), logout: { running: true } }));
 				const j = await postJson("/boss/logout");
 				setRemote((cur) => ({
@@ -1406,23 +1698,29 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 				}));
 			};
 
-			/** 状态迁移：改状态 + 补一条时间线。sending / preparing 由假定时器推到下一步。 */
+			/**
+			 * 状态迁移：改状态 + 补一条时间线。
+			 *
+			 * ⚠️ 这里**不再有假定时器**：以前 send/retry 走 `schedule(…, 900)` 把状态推到
+			 * "简历与打招呼语已发送"，看起来像真发出去了 —— 其实一个网络请求都没发，
+			 * 而且插件根本没有上传简历附件的代码。现在这四个动作都走真路由，
+			 * 成功失败由宿主的响应决定；文案也改成只说真发生的事。
+			 */
 			const setStatus = (id, status, text, flag) =>
 				setApps((cur) => cur.map((a) => (a.id === id ? { ...a, status, timeline: [...a.timeline, [stamp(), text, flag ?? 0]] } : a)));
 
 			const applyAction = (id, what) => {
-				if (what === "send") {
-					setStatus(id, "sending", "你按了确认，自动化开始投递");
-					schedule(() => setStatus(id, "sent", "简历与打招呼语已发送"), 900);
+				// 确认发送 = 把当前打招呼语真的发出去（不含附件简历）。
+				if (what === "send" || what === "retry") {
+					const current = apps.find((a) => a.id === id);
+					const text = (remote?.greet?.jobId === id ? remote?.greet?.text : null) ?? remote?.greetText ?? current?.greeting ?? "";
+					if (remote?.greet?.jobId !== id || remote?.greet?.text == null) generateGreeting(id);
+					sendGreetingNow(id, text);
 					return;
 				}
-				if (what === "retry") {
-					setStatus(id, "sending", "重试发送：已重新加载登录态");
-					schedule(() => setStatus(id, "sent", "简历与打招呼语已发送"), 900);
-					return;
-				}
+				// 去回话 = 把当前岗位的会话读出来并生成建议（不自动发消息）。
 				if (what === "reply") {
-					setStatus(id, "sent", "你已回话，等对方下一步");
+					loadConversationAndAdvice(id);
 					return;
 				}
 				if (what === "skip") {
@@ -1430,8 +1728,11 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					return;
 				}
 				if (what === "regenerate") {
-					setStatus(id, "preparing", "agent 正在按 JD 重新定制简历与话术");
-					schedule(() => setStatus(id, "review", "新的简历与话术已就绪，等你确认", 1), 1400);
+					setStatus(id, "preparing", "正在按 JD 润色结构化简历");
+					tailorResume(id).then((result) => {
+						if (result?.ok === true) setStatus(id, "review", "按 JD 润色的简历已生成，等你确认", 1);
+						else setStatus(id, "failed", result?.error ?? "简历润色失败", 1);
+					});
 					return;
 				}
 				if (what === "swapResume") {
@@ -1487,6 +1788,24 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					label,
 					h("span", null, String(count)),
 				);
+			/**
+			 * 七个维度的下拉项**从宿主拿**（/boss/state 的 filterSpecs ← boss/lib.mjs 的 FILTER_SPECS）。
+			 *
+			 * 之前这里手写了一份，行业只有 7 个 —— 而宿主字典里有 23 个，剩下 16 个
+			 * 用户永远选不到。现在选项和编码表在同一个文件里，两边不可能再各自漂移。
+			 * 宿主还没起来时退回一份最小的兜底，保证界面不空。
+			 */
+			const bossFilterSpecs = (remote?.filterSpecs ?? []).map((spec) => [spec.key, spec.label, spec.options]);
+			const fallbackFilterSpecs = [
+				["salary", "薪资", ["3K以下", "3-5K", "5-10K", "10-15K", "15-20K", "20-30K", "30-50K", "50K以上"]],
+				["experience", "经验", ["在校/应届", "1年以内", "1-3年", "3-5年", "5-10年", "10年以上"]],
+				["degree", "学历", ["初中及以下", "中专/中技", "高中", "大专", "本科", "硕士", "博士"]],
+				["jobType", "类型", ["全职", "实习", "兼职"]],
+				["industry", "行业", ["互联网", "软件/信息服务", "人工智能", "大数据", "云计算", "金融", "制造业"]],
+				["scale", "规模", ["0-20人", "20-99人", "100-499人", "500-999人", "1000-9999人", "10000人以上"]],
+				["stage", "融资", ["未融资", "天使轮", "A轮", "B轮", "C轮", "D轮及以上", "已上市", "不需要融资"]],
+			];
+			const filterSpecs = bossFilterSpecs.length > 0 ? bossFilterSpecs : fallbackFilterSpecs;
 
 			return h(
 				"div",
@@ -1518,10 +1837,10 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 									type: "button",
 									className: "bw_logout",
 									disabled: loggingOut,
-									title: "清掉本机保存的 Boss 凭证与浏览器 cookie",
+									title: "解除插件绑定，不退出真实 Chrome 中的 Boss",
 									onClick: () => doLogout(),
 								},
-								loggingOut ? "退出中…" : "退出登录",
+								loggingOut ? "解除中…" : "解除绑定",
 							)
 						: null,
 					h(
@@ -1549,8 +1868,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 									const v = e.target.value === "" ? null : e.target.value;
 									setCity(v);
 									refocus({ ...query, city: v });
-								},
-							},
+								},							},
 							h("option", { value: "" }, "不限"),
 							cityOptions.map((c) => h("option", { key: c, value: c }, c)),
 						),
@@ -1598,7 +1916,22 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 							DISTANCE_OPTIONS.map((o) => h("option", { key: String(o.km), value: o.km === null ? "" : String(o.km) }, o.label)),
 						),
 					),
+					...filterSpecs.map(([key, label, options]) =>
+						h(
+							"span",
+							{ className: "bw_field", key },
+							h("span", { className: "bw_fieldK" }, label),
+							h(
+								"select",
+								{ className: "bw_select", value: jobFilters[key] ?? "", onChange: (e) => setJobFilter(key, e.target.value) },
+								h("option", { value: "" }, "不限"),
+								options.map((option) => h("option", { key: option, value: option }, option)),
+							),
+						),
+					),
 					h("span", { className: "bw_count" }, "筛出 " + String(shownCount) + " / 共 " + String(apps.length) + " 个岗位"),
+					h("button", { type: "button", className: "bw_btn", onClick: saveCurrentWatch }, "保存监听"),
+					h("button", { type: "button", className: "bw_btn", disabled: remote?.watchRun?.running === true || coldActive || remote?.watch === null || remote?.watch === undefined, onClick: runCurrentWatch }, remote?.watchRun?.running === true ? "检查中…" : "检查新岗位"),
 				),
 				// 冷却期：撞过风控就把抓取锁上。这条带子解释"为什么按钮点不动" ——
 				// 不解释的话，用户只会觉得是 bug，然后去别处找办法硬试。
@@ -1624,7 +1957,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 								"span",
 								null,
 								logout.ok === true
-									? "已退出登录" + (logout.clearedCookies === null ? "（凭证已清；浏览器 cookie 没清掉，Playwright 不可用）" : `（凭证与 ${logout.clearedCookies} 个浏览器 cookie 已清）`) + " · 简历库和岗位列表没动"
+									? "已解除插件绑定（真实 Chrome 的 Boss 登录态未改动）· 简历库和岗位列表没动"
 									: String(logout.error ?? "退出失败"),
 							),
 						)
@@ -1659,6 +1992,9 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 										)
 									: h("span", null, "没抓到：" + scrape.error),
 						),
+				remote?.watchRun !== null && remote?.watchRun !== undefined && remote.watchRun.running !== true
+					? h("div", { className: "bw_scrape" + (remote.watchRun.error ? " bw_scrapeBad" : " bw_scrapeOk") }, h("span", { className: "bw_scrapeDot" }), remote.watchRun.error ?? remote.watchRun.message ?? (`监听检查完成：发现 ${String(remote.watchRun.newCount ?? 0)} 个新岗位`))
+					: null,
 				h(
 					"div",
 					{ className: "bw_cols" },
@@ -1672,6 +2008,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 						city,
 						kw,
 						maxKm,
+						jobFilters,
 						onClearQuery: clearQuery,
 						onScrape: doScrape,
 						scraping,
@@ -1679,7 +2016,24 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 						canScrape,
 						coldActive,
 					}),
-					h(DetailColumn, { app: selected, focusAction, onAct: applyAction, resumeName: selectedResume }),
+					h(DetailColumn, {
+						app: selected,
+						focusAction,
+						onAct: applyAction,
+						resumeName: selectedResume,
+						onFetchDetail: fetchDetail,
+						detailLoading: remote?.detail?.running === true && remote?.detail?.id === selected?.id,
+						assistant: remote?.assistant ?? null,
+						onConversation: loadConversationAndAdvice,
+						remote,
+						replyText: remote?.replyText ?? null,
+						onReplyText: (value) => setRemote((cur) => ({ ...(cur ?? {}), replyText: value })),
+						onSendReply: sendReplyToBoss,
+						greetText: remote?.greetText ?? null,
+						onGreetText: (value) => setRemote((cur) => ({ ...(cur ?? {}), greetText: value })),
+						onGenerateGreeting: generateGreeting,
+						onSendGreeting: sendGreetingNow,
+					}),
 					// 右栏是"证据 + 素材"：上半跟着选中项走，下半（简历库）永远在
 					h(
 						"div",

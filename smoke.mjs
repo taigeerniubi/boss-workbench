@@ -332,7 +332,8 @@ console.log("\n── 10. 抓取条件：城市 / 岗位 / 距离 ──");
 const base = render(mainEntry.component, {}, { 0: "j1" });
 const baseText = base.join("\n");
 check(/div\.bw_filters/.test(baseText), "工作台有一条独立的抓取条件条");
-check(countOf(base, /select\.bw_select/) === 2, `城市 / 距离是两个下拉（实际 ${countOf(base, /select\.bw_select/)}）`);
+check(countOf(base, /select\.bw_select/) === 9, `城市 / 距离 + Boss 七类筛选共 9 个下拉（实际 ${countOf(base, /select\.bw_select/)}）`);
+check(["薪资", "经验", "学历", "类型", "行业", "规模", "融资"].every((label) => baseText.includes(label)), "完整显示 boss.yaml 的岗位筛选维度");
 check(/input\.bw_kw/.test(baseText), "岗位关键词是输入框");
 check(/筛出/.test(baseText), "显示「筛出 N / 共 M 个岗位」");
 
@@ -420,19 +421,18 @@ const dockOut = render(dockPill.component, {}).join("\n");
 check(/div\.bw_balDock/.test(dockOut), "会话区右下角的余额 pill 渲染出来了（右对齐）");
 check(/span\.bw_balPill/.test(dockOut) && dockOut.includes("余额"), "样式是胶囊，文案带「余额」");
 
-console.log("\n── 13. 登录闸门（点工作台没登录就弹二维码）──");
+console.log("\n── 13. 登录闸门（复用真实 Chrome 会话）──");
 // hook 14 = LoginGate 的 gate 状态（0-10 WorkbenchPage，11 余额，12/13 简历库，14 闸门）
-const gate = render(mainEntry.component, {}, { 0: "j1", 14: { open: true, qr: "data:image/jpeg;base64,AAAA", phase: "waiting-scan", error: null } });
+const gate = render(mainEntry.component, {}, { 0: "j1", 14: { open: true, qr: null, phase: "waiting-browser", error: null } });
 const gateText = gate.join("\n");
 check(/div\.bw_gate/.test(gateText), "没登录时出现登录闸门");
-check(/img\.bw_gateQrImg/.test(gateText), "二维码以图片形式渲染");
-check(gateText.includes("请用 Boss 直聘 APP 扫码"), "提示用户扫码");
-const confirm = render(mainEntry.component, {}, { 0: "j1", 14: { open: true, qr: "x", phase: "waiting-confirm", error: null } });
-check(confirm.join("\n").includes("请在手机上点「确认登录」"), "扫到之后切成「等手机确认」");
-const fin = render(mainEntry.component, {}, { 0: "j1", 14: { open: true, qr: "x", phase: "finalizing", error: null } });
-check(/bw_spin/.test(fin.join("\n")), "安全验证阶段有转圈（这一步在宿主侧开浏览器，要几秒）");
-const flagged = render(mainEntry.component, {}, { 0: "j1", 14: { open: true, qr: null, phase: "flagged", error: "风控 code 35" } });
-check(flagged.join("\n").includes("重新获取二维码") && flagged.join("\n").includes("风控 code 35"), "被风控时给原因并给重试入口");
+check(gateText.includes("真实 Chrome 标签"), "提示用户在真实 Chrome 中完成登录");
+const fin = render(mainEntry.component, {}, { 0: "j1", 14: { open: true, qr: null, phase: "verifying", error: null } });
+check(/bw_spin/.test(fin.join("\n")), "单次登录校验阶段有转圈");
+const unavailable = render(mainEntry.component, {}, { 0: "j1", 14: { open: true, qr: null, phase: "browser-unavailable", error: "没有找到 Chrome" } });
+check(unavailable.join("\n").includes("重新连接 Chrome") && unavailable.join("\n").includes("没有找到 Chrome"), "CDP 不可用时给原因并给重连入口");
+const flagged = render(mainEntry.component, {}, { 0: "j1", 14: { open: true, qr: null, phase: "account-risk", error: "账号存在异常" } });
+check(flagged.join("\n").includes("重新连接 Chrome") && flagged.join("\n").includes("账号存在异常"), "账号风控时给原因并停止");
 const okGate = render(mainEntry.component, {}, { 0: "j1", 14: { open: true, qr: "x", phase: "logged-in", error: null } });
 check(okGate.join("\n").includes("开始用"), "登录成功后给「开始用」收掉弹窗");
 
@@ -445,7 +445,7 @@ const REAL = {
 	resumes: { files: [] },
 	jobs: [
 		{ id: "BJ1", company: "某某科技", title: "后端工程师", salary: "25-40K", city: "北京", area: "海淀区·中关村", distanceKm: 3.2, hr: "李女士", experience: "3-5年", degree: "本科", industry: "互联网", jd: "熟悉 Spring Cloud 与高并发", securityId: "s1", encryptJobId: "e1", scrapedAt: "2026-09-17T10:00:00Z" },
-		{ id: "BJ2", company: "远方网络", title: "Go 后端", salary: "20-30K", city: "深圳", area: "海淀区·中关村", distanceKm: null, hr: "王先生", experience: "1-3年", degree: "本科", industry: "企业服务", jd: "熟悉 Go 与云原生", securityId: "s2", encryptJobId: "e2", scrapedAt: "2026-09-17T09:00:00Z" },
+		{ id: "BJ2", company: "远方网络", title: "Go 后端", salary: "20-30K", city: "深圳", area: "海淀区·中关村", distanceKm: null, hr: "王先生", experience: "1-3年", degree: "本科", industry: "电子商务", jd: "熟悉 Go 与云原生", securityId: "s2", encryptJobId: "e2", scrapedAt: "2026-09-17T09:00:00Z" },
 		{ id: "BJ3", company: "京华数据", title: "数据平台工程师", salary: "30-50K", city: "北京", area: "东城区·国贸", distanceKm: null, hr: "赵女士", experience: "3-5年", degree: "硕士", industry: "大数据", jd: "熟悉 Flink", securityId: "s3", encryptJobId: "e3", scrapedAt: "2026-09-17T08:00:00Z" },
 	],
 };
@@ -459,6 +459,70 @@ check(cards(realView) === 3, `库里 3 条就渲染 3 张卡（实际 ${cards(re
 check(realText.includes("3.2km"), "同城有坐标 → 显示真实距离");
 check(realText.includes("距离未知"), "同城没坐标 → 距离未知，不编一个数");
 check(realText.includes("异地"), "异地岗位 → 异地（不按距离算）");
+
+// ── 13.5 七个筛选下拉必须真的筛（回归：它们曾经只是写进 state 没人读）──
+// 每条断言都对应一个"选了没反应"的真实 bug：jobMatches 原来根本不看 jobFilters。
+const withFilters = (filters) => cards(render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, jobFilters: filters } }));
+check(cards(realView) === 3, "不选任何维度时三条都在（对照组）");
+check(withFilters({ industry: "互联网" }) === 1, "按行业筛：只剩互联网那一条");
+check(withFilters({ industry: "大数据" }) === 1, "按行业筛：大数据也能筛出来");
+check(withFilters({ industry: "制造业" }) === 0, "筛一个没有的行业 → 空列表（而不是原样全显示）");
+check(withFilters({ degree: "硕士" }) === 1, "按学历筛：只剩硕士那一条");
+check(withFilters({ experience: "3-5年" }) === 2, "按经验筛：3-5年 有两条");
+check(withFilters({ experience: "1-3年" }) === 1, "按经验筛：1-3年 只有一条（不是把 3-5年 也算进去）");
+check(withFilters({ salary: "20-30K" }) === 3, "按薪资筛：三条的起薪（20/25/30K）都落在 20-30K 档内");
+check(withFilters({ salary: "15-20K" }) === 1, "按薪资筛：只有起薪 20K 的那条落在 15-20K 档");
+check(withFilters({ salary: "3-5K" }) === 0, "按薪资筛：起薪都高于 5K，3-5K 档筛空");
+check(withFilters({ salary: "10-15K" }) === 0, "按薪资筛：没有岗位的起薪落在 10-15K");
+check(withFilters({ salary: "3K以下" }) === 0, "按薪资筛：没有岗位落在 3K 以下");
+check(withFilters({ salary: "面议" }) === 3, "薪资档位非法时不乱筛，安全放行");
+check(withFilters({ scale: "1000-9999人" }) === 3, "列表没给规模字段时不误杀（服务端已筛过一轮）");
+check(withFilters({ industry: "互联网", degree: "本科" }) === 1, "多个维度同时生效（AND，不是 OR）");
+check(withFilters({ industry: "互联网", degree: "硕士" }) === 0, "多维度互斥时正确筛空");
+
+// 下拉项来自宿主（FILTER_SPECS），行业必须是完整 23 个而不是手写的 7 个
+const specView = render(mainEntry.component, {}, {
+	0: "BJ1",
+	7: { ...REAL, filterSpecs: [{ key: "industry", label: "行业", options: ["互联网", "电子商务", "医疗健康", "政府/非营利"] }] },
+});
+check(specView.join("\n").includes("医疗健康") && specView.join("\n").includes("政府/非营利"), "行业下拉项跟着宿主走，不再只放 7 个");
+
+const noJd = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, jobs: REAL.jobs.map((job) => job.id === "BJ1" ? { ...job, jd: "" } : job) } });
+check(noJd.join("\n").includes("获取完整 JD") && noJd.join("\n").includes("不会批量补全"), "列表缺 JD 时只给单条按需获取入口");
+const assisted = render(mainEntry.component, {}, {
+	0: "BJ1",
+	7: {
+		...REAL,
+		// 形状对齐宿主 /boss/assist/* 的真实返回：
+		// tailored 里带 polishedSections（逐段 before→after），
+		// conversation 里带 thread.friendId（没有它就不知道该发给谁）。
+		assistant: {
+			jobId: "BJ1", running: false,
+			tailored: {
+				resume: { summary: "5 年经验；核心技能：Java、Redis", skills: ["Java", "Redis"] },
+				changes: ["把匹配技能前置"],
+				warnings: ["Kubernetes 没有证据，不应写进简历"],
+				polishedSections: [
+					{ section: "技能", original: "技能：Docker、Java、Redis", polished: "技能：Java、Redis、Docker", changes: ["Java、Redis 前置"] },
+					{ section: "个人摘要", original: "五年后端", polished: "5 年经验；核心技能：Java、Redis", changes: ["按目标岗位重写摘要"] },
+				],
+				generalSuggestions: ["把「Java、Redis」放进摘要和第一段经历的第一条要点"],
+				keywordAdditions: ["Java", "Redis"],
+			},
+			conversation: {
+				messages: [{ direction: "incoming", text: "明天下午方便面试吗？" }],
+				thread: { friendId: 605029326, bossName: "李女士", company: "某某科技" },
+			},
+			reply: { drafts: [{ style: "简洁专业", text: "您好，明天下午可以，方便确认具体时间和面试形式吗？" }] },
+		},
+	},
+});
+const assistedText = assisted.join("\n");
+check(assistedText.includes("简历润色结果") && assistedText.includes("不应写进简历"), "展示按 JD 润色结果与真实性警告");
+check(assistedText.includes("原：") && assistedText.includes("改："), "润色结果给出逐段 before → after，而不是只说「已优化」");
+check(assistedText.includes("发送给 Boss") && assistedText.includes("605029326"), "回复草稿有真正的发送入口，并指名发给谁（不再只能复制）");
+check(assistedText.includes("生成话术") && assistedText.includes("发送打招呼"), "打招呼语有生成与发送两个入口");
+check(assistedText.includes("Boss：明天下午方便面试吗？") && assistedText.includes("方便确认具体时间"), "展示当前岗位会话与基于上下文的回复草稿");
 
 // 没有真数据时，必须一眼看出这是演示数据
 const demoView = render(mainEntry.component, {}, { 0: "j1" });
@@ -492,17 +556,17 @@ const busy = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, scrape: {
 check(busy.join("\n").includes("正在 Boss 搜「Java」"), "抓取中显示正在搜什么");
 check(/button\.bw_btn bw_btnGo bw_btnBusy(\s|$)/.test(busy.join("\n")), "抓取中按钮变忙碌态（不让重复点）");
 
-console.log("\n── 15. 退出登录 ──");
+console.log("\n── 15. 解除插件绑定 ──");
 // 有会话时才给退出入口
 const canLogout = render(mainEntry.component, {}, { 0: "BJ1", 7: REAL });
-check(/button\.bw_logout(\s|$)/.test(canLogout.join("\n")), "登录着的时候表头有「退出登录」");
+check(/button\.bw_logout(\s|$)/.test(canLogout.join("\n")), "绑定着的时候表头有解除入口");
 const noSession = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, session: { present: false } } });
 check(!/button\.bw_logout(\s|$)/.test(noSession.join("\n")), "没会话时不摆一个没用的退出按钮");
 const loggingOut = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, logout: { running: true } } });
-check(loggingOut.join("\n").includes("退出中…"), "点下去立刻变「退出中…」（不让重复点）");
+check(loggingOut.join("\n").includes("解除中…"), "点下去立刻变「解除中…」（不让重复点）");
 check(/button\.bw_logout(\s|$)/.test(loggingOut.join("\n")) && /disabled/.test(JSON.stringify(loggingOut)) === false, "忙碌态走的是 disabled 属性，不是换按钮");
 const loggedOut = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, session: { present: false }, logout: { running: false, at: 1, ok: true, clearedCookies: 12 } } });
-check(loggedOut.join("\n").includes("已退出登录") && loggedOut.join("\n").includes("12 个浏览器 cookie"), "退出成功后说清楚清了什么，不静默");
+check(loggedOut.join("\n").includes("已解除插件绑定") && loggedOut.join("\n").includes("真实 Chrome 的 Boss 登录态未改动"), "解除成功后说清楚不会动真实浏览器 cookie");
 check(loggedOut.join("\n").includes("简历库和岗位列表没动"), "说清楚退出不影响简历库与已抓岗位");
 const logoutFail = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, logout: { running: false, at: 1, ok: false, error: "宿主 /boss/logout 没响应（重启一次 GUI？）" } } });
 check(/div\.bw_scrape bw_scrapeBad(\s|$)/.test(logoutFail.join("\n")), "退出失败时变红并给原因");

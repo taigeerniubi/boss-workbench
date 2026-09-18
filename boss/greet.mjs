@@ -11,7 +11,8 @@
  * Cookd 那套结构化简历的价值就在这里：`skills` / `experience` / `yoe` / `degree`
  * 正好是打分需要的字段，不用再回头去啃全文。
  */
-import { httpApi, isFlagged, isLoggedOut } from "./lib.mjs";
+import { browserJson, classifyBossResponse, connectExistingBossBrowser } from "./browser-channel.mjs";
+import { markCooldown } from "./lib.mjs";
 
 const STOP = new Set(["负责", "参与", "熟悉", "了解", "掌握", "具备", "优先", "要求", "岗位", "职责", "任职", "工作", "相关", "经验", "能力", "良好", "以上", "以及", "能够", "独立", "熟练"]);
 
@@ -98,16 +99,45 @@ export function buildGreeting({ resume, job, profile = {}, maxChars = 180 } = {}
 }
 
 /**
- * 发送打招呼。接口契约来自参考项目：`GET /wapi/zpgeek/friend/add.json?securityId=&jobId=`
- *   - securityId 来自职位列表条目（每个岗位一份，别复用）
- *   - jobId 用 encryptJobId
+ * 发送打招呼 / 发起会话。契约来自两个参考实现的交集：
+ *   - boss-agent-cli `BossClient.greet()`：**POST** form
+ *       `securityId`, `jobId`, `greeting`（greeting 就是用户改过的那段话术）
+ *   - zhipin-geek `BossClient.add_friend()`：`securityId` + `lid`
+ *
+ * 两者都指向同一个路径 `/wapi/zpgeek/friend/add.json`，差别是参数名。
+ * 这里**一次请求把四个都带上**（securityId / jobId / lid / greeting）：
+ * 服务端取它认的那几个，不认的忽略。仍然只发一次 —— 不做"先 GET 再 POST"
+ * 那种在 Boss 眼里等于两次请求的补救。
+ *
+ * ⚠️ 上一版是 `GET ?securityId=&jobId=` 且**完全丢掉了 greeting**：
+ * 用户在输入框里改的话术根本没进过请求体，发出去的永远是服务端默认招呼语。
+ * 这是本次修掉的 bug 之一。
+ *
  * 风控码 35 / 登录态失效会原样报出来，不吞。
  */
-export async function sendGreeting(session, { securityId, jobId }, { referer } = {}) {
-	if (!securityId || !jobId) return { ok: false, error: "缺少 securityId 或 jobId" };
-	const r = await httpApi("/wapi/zpgeek/friend/add.json", { securityId, jobId }, session, referer === undefined ? {} : { referer });
-	if (isFlagged(r.json)) return { ok: false, error: `风控：${r.json.message}`, flagged: true };
-	if (isLoggedOut(r.json)) return { ok: false, error: `登录态失效：${r.json.message}`, loggedOut: true };
-	if (r.json?.code !== 0) return { ok: false, error: `code ${r.json?.code}: ${r.json?.message ?? r.text?.slice(0, 120)}`, raw: r.json };
+export async function sendGreeting(_session, { securityId, jobId, lid = "", text = "", referer } = {}) {
+	if (!securityId) return { ok: false, error: "缺少 securityId（打招呼必须用列表条目里那一个）" };
+	if (!jobId && !lid) return { ok: false, error: "缺少 jobId / lid，无法定位要打招呼的岗位" };
+	let r;
+	try {
+		const linked = await connectExistingBossBrowser();
+		if (!linked.loggedIn) return { ok: false, error: "现有 Chrome 的 Boss 登录态已失效", loggedOut: true };
+		const body = { securityId, greeting: text };
+		if (jobId) body.jobId = jobId;
+		if (lid) body.lid = lid;
+		r = await browserJson(linked.page, "/wapi/zpgeek/friend/add.json", {}, {
+			method: "POST",
+			body,
+			form: true,
+			referer: referer ?? "https://www.zhipin.com/web/geek/job",
+		});
+	} catch (err) {
+		return { ok: false, error: String(err?.message ?? err) };
+	}
+	const state = classifyBossResponse(r.json, r);
+	if (state.kind !== "success") {
+		if (["ip-risk", "account-risk", "environment-risk", "browser-blocked", "rate-limited"].includes(state.kind)) markCooldown({ kind: state.kind, message: `打招呼终止：${r.json?.message ?? state.kind}` });
+		return { ok: false, error: r.json?.message ?? state.kind, flagged: state.kind.includes("risk") || state.kind === "browser-blocked", loggedOut: state.kind === "logged-out" };
+	}
 	return { ok: true, data: r.json?.zpData ?? {}, raw: r.json };
 }
