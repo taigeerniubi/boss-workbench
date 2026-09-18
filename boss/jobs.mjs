@@ -87,12 +87,15 @@ export async function runScrape(opts = {}) {
 	let stopped = null;
 	let linked;
 	try {
-		linked = opts.transport === undefined ? await connectExistingBossBrowser() : null;
+		// autoLaunch：浏览器被关掉之后，用户点「抓取岗位」就该自己再拉一个，
+		// 而不是甩一句"连不上"让他去重启 GUI。重复触发由 browser-channel 的
+		// 60 秒防抖闸门挡住（窗口关掉时闸门会复位）。
+		linked = opts.transport === undefined ? await connectExistingBossBrowser({ autoLaunch: true }) : null;
 	} catch (err) {
 		return { ok: false, reason: err?.code ?? "browser", error: String(err?.message ?? err), fetched: 0, added: 0, jobs: [] };
 	}
 	if (opts.transport === undefined && linked?.loggedIn !== true) {
-		return { ok: false, reason: "logged-out", error: "现有 Chrome 里的 Boss 尚未登录，请先在该浏览器标签中完成登录" };
+		return { ok: false, reason: "logged-out", error: "那个浏览器里的 Boss 还没登录，请在它打开的窗口里完成登录" };
 	}
 	const request = opts.transport?.request ?? ((path, params, options) => browserJson(linked.page, path, params, options));
 

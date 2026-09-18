@@ -55,8 +55,9 @@ export async function fetchJobDetail(id, { transport = null, save = true } = {})
 	const encryptJobId = current.encryptJobId || current.id || "";
 	if (securityId === "" && encryptJobId === "") return { ok: false, reason: "no-job-key", error: "这条岗位既没有 securityId 也没有 encryptJobId，无法取详情；请重新抓一次岗位列表" };
 	const request = transport?.request ?? (async (path, params, options) => {
-		const linked = await connectExistingBossBrowser();
-		if (!linked.loggedIn) throw new Error("现有 Chrome 的 Boss 登录态已失效");
+		// autoLaunch：窗口被关掉后，取 JD 也该能自己再拉一个。
+		const linked = await connectExistingBossBrowser({ autoLaunch: true });
+		if (!linked.loggedIn) throw new Error("那个浏览器里的 Boss 登录态已失效，请在弹出的窗口里重新登录");
 		return browserJson(linked.page, path, params, options);
 	});
 	let response;

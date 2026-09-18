@@ -50,8 +50,20 @@ export async function selectExistingBossSession(contexts) {
 }
 
 let cached = null;
-/** 自动拉起 Chrome 每进程只试一次 —— 失败就等用户点「重新连接」，别每次读状态都去 spawn。 */
-let autoLaunchAttempted = false;
+/**
+ * 自动拉起的**防抖闸门**。
+ *
+ * 以前这里是"每进程只试一次"，本意是别每次读状态都去 spawn。但它有个真 bug：
+ * **用户把窗口关掉之后，这个变量没有复位**，于是插件永远认为"已经试过了"，
+ * 再也不会自己拉 —— 用户看到的就是"搜不了了"，只能重启 GUI。
+ *
+ * 改成两道：
+ *   1. 时间防抖：60 秒内不重复尝试（挡住"读一次状态就 spawn 一次"的抖动）；
+ *   2. 连接断开时复位（见下面的 disconnected 处理）—— 窗口被关掉是**新情况**，该重试。
+ */
+const AUTO_LAUNCH_COOLDOWN_MS = 60 * 1000;
+let autoLaunchAttemptedAt = 0;
+const autoLaunchAllowed = () => Date.now() - autoLaunchAttemptedAt >= AUTO_LAUNCH_COOLDOWN_MS;
 
 /**
  * 连现有 Chrome；**连不上就先把 Chrome 拉起来再连一次**。
@@ -72,21 +84,23 @@ export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chr
 	try {
 		browser = await chromium.connectOverCDP(safeUrl, { timeout: 5000 });
 	} catch {
-		// 连不上通常是两种情况之一：① 浏览器没带调试参数启动；② 压根没开着。
+		// 连不上通常是两种情况之一：① 浏览器没带调试参数启动；② 压根没开着（或被关掉了）。
 		// 与其让用户去敲命令行，不如插件自己起一个（挑没在跑的浏览器 + 插件自己的 profile）。
 		let boot = null;
-		if (autoLaunch && !autoLaunchAttempted) {
-			autoLaunchAttempted = true;
+		if (autoLaunch && autoLaunchAllowed()) {
+			autoLaunchAttemptedAt = Date.now();
 			boot = await ensureDebuggableChrome({ port: Number(new URL(safeUrl).port || 80) });
 			if (!boot.ok) throw new BrowserSessionError("CDP_UNAVAILABLE", describeBootFailure(boot));
 			effectiveUrl = `http://127.0.0.1:${boot.port}`;
 		}
 		if (boot === null) {
+			const waiting = Math.ceil((AUTO_LAUNCH_COOLDOWN_MS - (Date.now() - autoLaunchAttemptedAt)) / 1000);
 			throw new BrowserSessionError(
 				"CDP_UNAVAILABLE",
 				`没有找到可复用的浏览器调试会话（${safeUrl}）。` +
-					`插件会在打开工作台时自己拉起一个带调试口的浏览器；如果一直不成功，` +
-					`可以用 BOSS_CHROME_PATH 指定浏览器，或按 README「启动真实 Chrome 会话」那节手动启动。`,
+					`${autoLaunch ? `刚试过一次自动拉起，${waiting} 秒后会自动再试（或点「帮我启动浏览器」立刻重试）。` : "插件会在打开工作台时自己拉起一个带调试口的浏览器。"}` +
+					`一直不成功可以用 BOSS_CHROME_PATH 指定浏览器，或按 README「启动真实 Chrome 会话」那节手动启动。` +
+					`另外：**关掉那个窗口就等于断掉插件的通道** —— 抓取和读会话都需要它开着（不想看见它可以用 BOSS_CHROME_MODE=hidden）。`,
 			);
 		}
 		try {
@@ -102,7 +116,12 @@ export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chr
 		}
 	}
 	cached = { browser, cdpUrl: effectiveUrl };
-	browser.on?.("disconnected", () => { if (cached?.browser === browser) cached = null; });
+	browser.on?.("disconnected", () => {
+		if (cached?.browser === browser) cached = null;
+		// 窗口被关掉是**新情况**：清掉防抖时间戳，让下一次请求可以重新拉起。
+		// 不复位的话插件会永远认为"已经试过了"，用户只能重启 GUI —— 这就是"搜不了了"。
+		autoLaunchAttemptedAt = 0;
+	});
 	const picked = await selectExistingBossSession(browser.contexts());
 	if (picked === null) throw new BrowserSessionError("BROWSER_SESSION_NOT_FOUND", "浏览器里没有可复用的 Boss 页面或登录态");
 	if (requirePage && picked.page === null) throw new BrowserSessionError("BOSS_PAGE_NOT_FOUND", "浏览器已登录 Boss，但没有打开 Boss 页面；请先打开职位页再重试");
@@ -114,15 +133,22 @@ function describeBootFailure(boot) {
 	const lines = [
 		boot.error ?? "没能拉起可调试的 Chrome",
 	];
-	if (boot.path) lines.push(`用到的浏览器：${boot.path}`);
+	if (boot.path) lines.push(`用到的浏览器：${boot.path}${boot.mode === "hidden" ? "（隐藏模式）" : ""}`);
 	if (Array.isArray(boot.tried) && boot.tried.length > 0) lines.push(`找过这些位置：\n  ${boot.tried.join("\n  ")}`);
+	if (boot.mode === "hidden") lines.push("当前是隐藏模式（BOSS_CHROME_MODE=hidden）。如果它起不来，去掉这个环境变量回到可见窗口再试一次。");
 	lines.push("也可以在「设置 → 环境变量」里给 BOSS_CHROME_PATH 指定 chrome.exe 的绝对路径，或设 BOSS_AUTO_CHROME=0 关掉自动拉起。");
 	return lines.join("\n");
 }
 
-/** 供测试重置每进程只试一次的闸门。 */
+/** 给测试用：看清防抖闸门的当前状态。 */
+export function autoLaunchState() {
+	return { attemptedAt: autoLaunchAttemptedAt, allowed: autoLaunchAllowed(), cooldownMs: AUTO_LAUNCH_COOLDOWN_MS };
+}
+
+/** 供测试重置每进程状态。 */
 export function resetAutoLaunchForTests() {
-	autoLaunchAttempted = false;
+	autoLaunchAttemptedAt = 0;
+	cached = null;
 }
 
 /** 在现有页面的 JS 环境中只发一次 fetch；cookie、浏览器指纹和出口网络自然一致。 */

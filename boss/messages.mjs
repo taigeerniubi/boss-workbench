@@ -174,8 +174,9 @@ export function normalizeThread(friend, lastMessage, myUid) {
 }
 
 async function defaultRequest(path, params, options) {
-	const linked = await connectExistingBossBrowser();
-	if (!linked.loggedIn) throw new Error("现有 Chrome 的 Boss 登录态已失效");
+	// autoLaunch：那个窗口被关掉之后，读会话/发消息也该能自己再拉一个。
+	const linked = await connectExistingBossBrowser({ autoLaunch: true });
+	if (!linked.loggedIn) throw new Error("那个浏览器里的 Boss 登录态已失效，请在弹出的窗口里重新登录");
 	return browserJson(linked.page, path, params, options);
 }
 

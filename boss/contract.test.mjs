@@ -850,15 +850,20 @@ await check("端口探测：/json/version 出 JSON 才算就绪；异常不算",
 	assert.equal((await probeCdp(9222, { fetchImpl: async () => { throw new Error("ECONNREFUSED"); } })).up, false);
 });
 
-await check("自动拉起只在一处触发：连不上时才试，且每进程只试一次", async () => {
+await check("自动拉起：只在连不上时试，带防抖，且窗口关掉后会复位", async () => {
 	const source = await import("node:fs").then((fs) => fs.readFileSync(new URL("./browser-channel.mjs", import.meta.url), "utf8"));
-	assert.match(source, /autoLaunch && !autoLaunchAttempted/u, "要有每进程只试一次的闸门");
+	// 防抖闸门（挡住"读一次状态就 spawn 一次"）
+	assert.match(source, /AUTO_LAUNCH_COOLDOWN_MS/u, "要有防抖冷却");
+	assert.match(source, /autoLaunch && autoLaunchAllowed\(\)/u);
+	// 关键修复：窗口被关掉时必须复位，否则插件永远认为"试过了"，用户只能重启 GUI
+	assert.match(source, /autoLaunchAttemptedAt = 0;/u, "disconnected 时要复位防抖时间戳");
+	assert.match(source, /"disconnected"/u);
 	assert.match(source, /ensureDebuggableChrome/u);
-	// 抓取/读会话这些高频路径不该自己拉浏览器
-	const jobs = await import("node:fs").then((fs) => fs.readFileSync(new URL("./jobs.mjs", import.meta.url), "utf8"));
-	assert.equal(/auto-chrome|ensureDebuggableChrome/u.test(jobs), false, "抓取路径不该 spawn 浏览器");
-	const messages = await import("node:fs").then((fs) => fs.readFileSync(new URL("./messages.mjs", import.meta.url), "utf8"));
-	assert.equal(/auto-chrome|ensureDebuggableChrome/u.test(messages), false, "读会话路径不该 spawn 浏览器");
+	// 抓取 / 取 JD / 读会话这些路径也要能自己再拉（关窗口后点抓取就该能恢复）
+	for (const file of ["jobs.mjs", "detail.mjs", "messages.mjs"]) {
+		const text = await import("node:fs").then((fs) => fs.readFileSync(new URL(`./${file}`, import.meta.url), "utf8"));
+		assert.match(text, /autoLaunch: true/u, `${file} 应该在连不上时允许自动拉起`);
+	}
 });
 
 await check("静态护栏：这个模块里没有任何杀进程/结束用户的浏览器的动作", async () => {
