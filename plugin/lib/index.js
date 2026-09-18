@@ -20,7 +20,7 @@
  * `/boss` 前缀由 webServer 的最长前缀匹配独占，不会碰到 shell 自己的路由。
  */
 import { join } from "node:path";
-import { DATA_DIR, RESUMES_DIR, loadProfile, loadSession, loginStateHttp, readJson, writeJson } from "../../boss/lib.mjs";
+import { DATA_DIR, RESUMES_DIR, loadProfile, loadSession, loginStateHttp, readCooldown, readJson, writeJson } from "../../boss/lib.mjs";
 import { fetchBalance } from "../../boss/balance.mjs";
 import { loginState, logout, pollLogin, startLogin } from "../../boss/loginflow.mjs";
 import { buildGreeting, sendGreeting } from "../../boss/greet.mjs";
@@ -110,6 +110,8 @@ async function handle(ctx, req, res) {
 			lastQuery: jobsFile?.lastQuery ?? null,
 			profile: loadProfile(),
 			session: session === null ? { present: false } : { present: true, hasStoken: Boolean(session.stoken), savedAt: session.savedAt ?? null },
+			// 冷却期：撞过风控就锁上。界面要能看见"为什么现在不让我抓"
+			cooldown: readCooldown(),
 			resumesDir: RESUMES_DIR,
 		});
 	}

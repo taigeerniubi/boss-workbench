@@ -12,7 +12,8 @@
 import { join } from "node:path";
 import {
 	DATA_DIR, EXPERIENCE_MAP, JOB_TYPE_MAP, RUNS_DIR, SALARY_MAP, ensureDirs, filterJobs, httpApi,
-	isFlagged, isLoggedOut, loadProfile, loadSession, normalizeJob, readJson, resolveCity, writeJson,
+	isFlagged, isLoggedOut, loadProfile, loadSession, markCooldown, normalizeJob, readCooldown, readJson,
+	resolveCity, writeJson,
 } from "./lib.mjs";
 
 export const MAX_PAGES = 10;
@@ -50,6 +51,22 @@ export async function runScrape(opts = {}) {
 	const save = opts.save !== false;
 
 	if (session === null) return { ok: false, reason: "no-session", error: "还没有登录会话 —— 先在工作台里扫码登录（或跑 node boss/login.mjs）" };
+
+	// ── 冷却期：撞过风控就别再打了 ──────────────────────────────────────────
+	// 风控按行为频率扣分，而人在排障时最容易做的就是"再试一次"。
+	// 所以把"停手"做成规则：见过 code 35/37 之后这里直接拒绝执行。
+	const cold = readCooldown();
+	if (cold !== null && cold.expired === false && opts.ignoreCooldown !== true) {
+		const mins = Math.ceil(cold.remainingMs / 60000);
+		return {
+			ok: false,
+			reason: "cooldown",
+			error: `还在冷却期（约 ${mins} 分钟后解禁）。上一次撞到：${cold.message ?? cold.kind}。\n`
+				+ `  风控是按频率扣分的，"再试一次"只会把分推得更高。\n`
+				+ `  确实要现在跑：node boss/scrape.mjs … --ignore-cooldown，或者删掉 ${join(DATA_DIR, "cooldown.json")}`,
+			cooldown: { kind: cold.kind, until: cold.until, remainingMs: cold.remainingMs, message: cold.message },
+		};
+	}
 
 	const cityCode = resolveCity(city);
 	if (mode === "search" && cityCode === null) {
@@ -89,6 +106,7 @@ export async function runScrape(opts = {}) {
 
 		if (isFlagged(r.json)) {
 			stopped = { kind: "flagged", message: `风控 code 35：${r.json.message}` };
+			markCooldown({ kind: "flagged", message: `code 35 风控：${r.json.message}` });
 			rawPages.push({ page: p, url: r.url, flagged: true, body: r.json });
 			break;
 		}
@@ -99,6 +117,8 @@ export async function runScrape(opts = {}) {
 		}
 		if (r.json?.code === 37) {
 			stopped = { kind: "abnormal-env", message: `Boss 说"您的环境存在异常"（code 37）：${JSON.stringify(r.json?.zpData ?? {}).slice(0, 200)}` };
+			// 37 是签名挑战，重试**不会**变好；而且连着重试同样会推高风险分。短锁一下。
+			markCooldown({ kind: "abnormal-env", message: "code 37 环境异常（签名挑战，重试无用）" });
 			rawPages.push({ page: p, url: r.url, body: r.json });
 			break;
 		}
@@ -120,8 +140,10 @@ export async function runScrape(opts = {}) {
 	// Code 37 的响应体是 `{seed, name, ts}`：Boss 要的不是"你登录了没有"，
 	// 而是"这个请求是不是它自己的页面发的"。那套算法在 Boss 的 JS bundle 里而且会变，
 	// 硬逆向等于跟一个每天变的目标赛跑。换个思路：**让它的页面去发**，我们只截 JSON。
-	// 代价是要开一次无头浏览器（几秒），收益是不用维护签名算法。
-	const usedBrowser = stopped?.kind === "abnormal-env" && mode === "search" && opts.browserFallback !== false;
+	//
+	// 但默认**不**自动兜底：兜底会再打一次 Boss（开浏览器 + 发请求），
+	// 而"别频繁测"比"少点一次"重要。要用显式开：--browser / browserFallback: true。
+	const usedBrowser = stopped?.kind === "abnormal-env" && mode === "search" && opts.browserFallback === true;
 	if (usedBrowser) {
 		log("Node 直连被签名挑战挡了（code 37）→ 改用浏览器发这个搜索请求");
 		try {
@@ -140,6 +162,7 @@ export async function runScrape(opts = {}) {
 						+ (br.onPage?.includes("verify") ? ` —— 页面被弹到验证墙了，先跑 node boss/verify-browser.mjs 过一次真人验证` : ""),
 					onPage: br.onPage ?? null,
 				};
+				markCooldown({ kind: "browser-blocked", message: "浏览器路径也不通（网页端不认这个登录态）" });
 			}
 		} catch (err) {
 			stopped = { kind: "browser-error", message: `浏览器兜底失败：${String(err?.message ?? err).split("\n")[0]}` };
@@ -188,6 +211,7 @@ export async function runScrape(opts = {}) {
 		jobs,
 		stopped,
 		usedBrowser,
+		cooldown: readCooldown(),
 		nearKm: maxKm === null ? null : filterJobs(jobs, { maxKm }).length,
 	};
 }

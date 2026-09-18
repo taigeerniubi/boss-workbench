@@ -42,6 +42,8 @@ function parseArgs(argv) {
 		else if (a === "--min-delay") out.minDelay = Number(next());
 		else if (a === "--max-delay") out.maxDelay = Number(next());
 		else if (a === "--yes") out.yes = true;
+		else if (a === "--browser") out.browser = true;
+		else if (a === "--ignore-cooldown") out.ignoreCooldown = true;
 		else if (a === "--help" || a === "-h") out.help = true;
 	}
 	return out;
@@ -58,7 +60,13 @@ if (args.help) {
   --job-type <全职|兼职>
   --salary <3k以下|3-5k|5-10k|10-20k|20-50k|50以上>
   --pages <n> --page-size <n> --max-km <n> --min-delay <ms> --max-delay <ms>
+  --browser                 撞 code 37 时改用浏览器兜底（默认不开：那会再打一次 Boss）
+  --ignore-cooldown         忽略冷却期，强行执行（撞过风控后会锁上，见下）
   --yes                     真正执行（不加只打印计划）
+
+  冷却期：见过 code 35（IP/账号异常）或 37（签名挑战）之后，本工具会自己锁一段时间，
+  期间直接拒绝执行 —— 风控按频率扣分，"再试一次"只会更糟。锁的状态在
+  data/cooldown.json，要提前解锁就用 --ignore-cooldown。
 `);
 	process.exit(0);
 }
@@ -96,6 +104,8 @@ const result = await runScrape({
 	experience: args.experience,
 	jobType: args.jobType,
 	salary: args.salary,
+	browserFallback: args.browser === true,
+	ignoreCooldown: args.ignoreCooldown === true,
 	log: (line) => console.log(`  ${line}`),
 });
 

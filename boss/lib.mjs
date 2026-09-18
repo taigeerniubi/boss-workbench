@@ -424,6 +424,63 @@ export async function httpApi(path, params = {}, session, { method = "GET", refe
 /** 登录态失效（code 7）和风控（code 35）要分开处理：前者重新登录，后者必须停手。 */
 export const isLoggedOut = (json) => json !== null && typeof json === "object" && (json.code === 7 || /登录状态已失效|请先登录/u.test(String(json.message ?? "")));
 
+//#region 冷却期 —— 撞了风控就**自己锁上**，不靠人记得住
+/**
+ * 风控是按"行为频率"扣分的，而人（包括我）在排障时最容易干的事就是"再试一次"。
+ * 所以把"停手"做成规则而不是纪律：见过一次 code 35 就写一个冷却标记，
+ * 之后所有抓取入口**直接拒绝执行**，直到时间到。
+ *
+ * 这样"账号不要特别频繁地测"这件事就由代码保证，不靠自觉。
+ */
+const COOLDOWN_PATH = () => join(DATA_DIR, "cooldown.json");
+
+/** 风控信号分别锁多久。35 是硬风控（IP/账号异常），37 是签名挑战（重试也没用，但短锁）。 */
+export const COOLDOWN_MINUTES = { flagged: 120, "abnormal-env": 20, "browser-blocked": 20 };
+
+export function readCooldown() {
+	const c = readJson(COOLDOWN_PATH(), null);
+	if (c === null || typeof c.until !== "number") return null;
+	return { ...c, remainingMs: Math.max(0, c.until - Date.now()), expired: Date.now() >= c.until };
+}
+
+/**
+ * 记一次冷却。`kind` 见 COOLDOWN_MINUTES；没列进来的按 30 分钟。
+ * 只延长不缩短 —— 又撞一次不会把已经记下的时间改小。
+ */
+export function markCooldown({ kind, message, minutes }) {
+	const mins = minutes ?? COOLDOWN_MINUTES[kind] ?? 30;
+	const until = Date.now() + mins * 60 * 1000;
+	const prev = readCooldown();
+	const next = {
+		kind,
+		message: message ?? null,
+		until: Math.max(until, prev !== null && prev.expired === false ? prev.until : 0),
+		minutes: mins,
+		at: new Date().toISOString(),
+	};
+	writeJson(COOLDOWN_PATH(), next);
+	return { ...next, remainingMs: next.until - Date.now(), expired: false };
+}
+
+export function clearCooldown() {
+	writeJson(COOLDOWN_PATH(), null);
+}
+//#endregion
+
+/**
+ * Boss 眼里的**出口 IP**。`header.json` 里 `clientIP` 就是它。
+ *
+ * 为什么专门做一个：`fetch` **不会**自动走系统代理，而 Playwright 会被显式配上代理。
+ * 于是"登录那一步在浏览器里做（走代理）"和"之后 Node 发请求（直连）"可能来自
+ * **两个不同的 IP** —— 同一个会话连着两个 IP 跳，正是"环境存在异常"的经典触发条件。
+ * 这个函数就是用来把这件事量出来的。
+ */
+export async function egressIp(session = { cookie: "", bst: "" }) {
+	const r = await httpApi("/wapi/zpgeek/common/data/header.json", {}, session);
+	const html = typeof r.json?.zpData === "string" ? r.json.zpData : "";
+	return /clientIP\s*:\s*["']([^"']+)["']/u.exec(html)?.[1] ?? null;
+}
+
 /**
  * 当前登录态。
  *

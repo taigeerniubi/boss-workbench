@@ -510,5 +510,20 @@ check(logoutFail.join("\n").includes("重启一次 GUI"), "失败原因里点名
 // 闸门必须能在"刚退出"之后重新弹回来
 check(/reloadKey/.test(readFileSync(new URL("./plugin/lib/client.js", import.meta.url), "utf8")), "闸门接了 reloadKey（退出后能自己弹回来）");
 
+console.log("\n── 16. 风控冷却期（撞了风控就自己锁上）──");
+const noCold = render(mainEntry.component, {}, { 0: "BJ1", 7: REAL });
+check(!noCold.join("\n").includes("风控冷却中"), "没冷却时不显示冷却条");
+const cooling = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, cooldown: { kind: "flagged", message: "code 35 风控：您的IP地址存在异常行为", until: Date.now() + 90 * 60000, remainingMs: 90 * 60000, expired: false } } });
+const coldText = cooling.join("\n");
+check(coldText.includes("风控冷却中"), "冷却期显示红色冷却条");
+check(coldText.includes("90 分钟"), "说清楚还剩多久解禁");
+check(coldText.includes("您的IP地址存在异常行为"), "把上次撞到的原因原样带出来");
+check(coldText.includes("抓取被锁住"), "明说这期间抓不了，别让人以为是坏了");
+check(/button\.bw_btn bw_btnGo bw_btnCold(\s|$)/.test(coldText), "抓取按钮变冷却样式");
+check(coldText.includes("冷却中"), "按钮文案变「冷却中」而不是「抓取岗位」");
+const expiredCold = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, cooldown: { kind: "flagged", message: "x", until: Date.now() - 1000, remainingMs: 0, expired: true } } });
+check(!expiredCold.join("\n").includes("风控冷却中"), "冷却过期后不再拦着（expired=true 就是解禁了）");
+check(/button\.bw_btn bw_btnGo(\s|$)/.test(expiredCold.join("\n")), "解禁后按钮回到正常的「抓取岗位」");
+
 console.log("\n" + (fail.length === 0 ? "全部通过 ✅" : `${fail.length} 项失败 ❌`));
 process.exit(fail.length === 0 ? 0 : 1);

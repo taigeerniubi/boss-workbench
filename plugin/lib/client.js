@@ -30,6 +30,8 @@ window.__ModuleLoader__.load({
 .bw_btnGo:disabled,.bw_btnBusy{opacity:.6;cursor:progress}
 .bw_btnGo:disabled:hover{filter:none}
 .bw_btnBusy{color:#fff;background:var(--dsw-alias-state-business-primary,#4176e6)}
+/* 冷却期：按钮看着就"别按" */
+.bw_btnCold,.bw_btnCold:hover{color:var(--dsw-alias-state-error-primary,#ec1313);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ec1313) 12%,transparent);filter:none;cursor:not-allowed}
 .bw_spacer{flex:1}
 
 /* 顶部三个计数 = 状态筛选段控件（点一下筛，再点一下取消） */
@@ -569,7 +571,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 		//#endregion
 
 		//#region 第 ① 栏：JD 队列
-		function QueueColumn({ apps, selectedId, onPick, onPickStatus, filter, onClearFilter, city, kw, maxKm, onClearQuery, onScrape, scraping, hasReal }) {
+		function QueueColumn({ apps, selectedId, onPick, onPickStatus, filter, onClearFilter, city, kw, maxKm, onClearQuery, onScrape, scraping, hasReal, canScrape, coldActive }) {
 			const visible = apps.filter((a) => jobMatches(a, { filter, city, kw, maxKm }));
 			const groups = GROUPS.map((g) => ({ g, items: visible.filter(g.match).sort(byUrgency) })).filter((x) => x.items.length > 0);
 			const tag = labelFilter(filter);
@@ -629,10 +631,10 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 											{
 												type: "button",
 												className: "bw_btn bw_btnGo",
-												disabled: scraping === true,
+												disabled: canScrape !== true,
 												onClick: () => onScrape(),
 											},
-											scraping === true ? "抓取中…" : kw.trim() === "" ? "抓推荐岗位" : "去 Boss 搜「" + kw.trim() + "」",
+											scraping === true ? "抓取中…" : coldActive === true ? "冷却中…" : kw.trim() === "" ? "抓推荐岗位" : "去 Boss 搜「" + kw.trim() + "」",
 										),
 									),
 								},
@@ -1338,13 +1340,22 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			// smoke.mjs 的 hook 序号（0-10 归本组件，11 起归子组件）不能再挪了。
 			const scrape = remote?.scrape ?? null;
 			const scraping = scrape?.running === true;
+			/**
+			 * 冷却期：宿主撞过风控就把抓取锁上，这里跟着禁用按钮。
+			 * 风控按频率扣分，"再点一次"正是最该被拦下来的那个动作 ——
+			 * 靠人自觉是拦不住的，所以按钮直接点不动。
+			 */
+			const cold = remote?.cooldown ?? null;
+			const coldActive = cold !== null && cold.expired === false;
+			const coldMinutes = coldActive ? Math.max(1, Math.ceil((cold.remainingMs ?? 0) / 60000)) : 0;
+			const canScrape = scraping === false && coldActive === false;
 
 			/**
 			 * 一次抓取。`override` 用来让"清空条件后改抓推荐流"这类动作复用同一条路径。
 			 * 有关键词走 search，没关键词走 recommend —— 后者是参考项目实测唯一稳的那条。
 			 */
 			const doScrape = async (override) => {
-				if (scraping) return;
+				if (!canScrape) return;
 				const q = String(override?.query ?? kw).trim();
 				const c = override?.city === undefined ? city : override.city;
 				const km = override?.maxKm === undefined ? maxKm : override.maxKm;
@@ -1488,12 +1499,14 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 						"button",
 						{
 							type: "button",
-							className: "bw_btn bw_btnGo" + (scraping ? " bw_btnBusy" : ""),
-							disabled: scraping,
-							title: kw.trim() === "" ? "没有关键词，就抓 Boss 的推荐流" : "去 Boss 搜「" + kw.trim() + "」",
+							className: "bw_btn bw_btnGo" + (scraping ? " bw_btnBusy" : "") + (coldActive ? " bw_btnCold" : ""),
+							disabled: canScrape === false,
+							title: coldActive
+								? `冷却中（约 ${coldMinutes} 分钟）：上一次撞到 ${cold?.message ?? cold?.kind ?? "风控"}。风控按频率扣分，等一等再抓。`
+								: kw.trim() === "" ? "没有关键词，就抓 Boss 的推荐流" : "去 Boss 搜「" + kw.trim() + "」",
 							onClick: () => doScrape(),
 						},
-						scraping ? "抓取中…" : "抓取岗位",
+						scraping ? "抓取中…" : coldActive ? "冷却中" : "抓取岗位",
 					),
 					h("span", { className: "bw_spacer" }),
 					h(WorkbenchBalance, null),
@@ -1560,7 +1573,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 							{
 								type: "button",
 								className: "bw_kwGo",
-								disabled: scraping,
+								disabled: canScrape === false,
 								title: kw.trim() === "" ? "留空 → 抓推荐流" : "去 Boss 搜「" + kw.trim() + "」",
 								onClick: () => doScrape(),
 							},
@@ -1587,6 +1600,20 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					),
 					h("span", { className: "bw_count" }, "筛出 " + String(shownCount) + " / 共 " + String(apps.length) + " 个岗位"),
 				),
+				// 冷却期：撞过风控就把抓取锁上。这条带子解释"为什么按钮点不动" ——
+				// 不解释的话，用户只会觉得是 bug，然后去别处找办法硬试。
+				coldActive
+					? h(
+							"div",
+							{ className: "bw_scrape bw_scrapeBad" },
+							h("span", { className: "bw_scrapeDot" }),
+							h(
+								"span",
+								null,
+								`风控冷却中（约 ${coldMinutes} 分钟后解禁）· 上次：${cold?.message ?? cold?.kind ?? "?"} · 这期间抓取被锁住，风控按频率扣分，"再试一次"只会更糟`,
+							),
+						)
+					: null,
 				// 退出登录的结果条（成功/失败各说各的，别让按钮点下去没交代）
 				logout !== null && logout.running !== true && logout.at !== undefined
 					? h(
@@ -1649,6 +1676,8 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 						onScrape: doScrape,
 						scraping,
 						hasReal,
+						canScrape,
+						coldActive,
 					}),
 					h(DetailColumn, { app: selected, focusAction, onAct: applyAction, resumeName: selectedResume }),
 					// 右栏是"证据 + 素材"：上半跟着选中项走，下半（简历库）永远在

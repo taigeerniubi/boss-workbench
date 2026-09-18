@@ -17,7 +17,10 @@
  *   node boss/verify-browser.mjs --direct     直连，不走代理（Clash 把 zhipin 走了国外节点时用这个）
  *   node boss/verify-browser.mjs --search "后端开发"  --city 北京
  */
-import { LAUNCH_ARGS, PROFILE_DIR, SITE, ensureDirs, loadChromium, systemProxy } from "./lib.mjs";
+import { LAUNCH_ARGS, PROFILE_DIR, SITE, ensureDirs, systemProxy } from "./lib.mjs";
+// loadChromium 在 playwright.mjs 里，**不是** lib.mjs 的导出 —— lib.mjs 只是 import 了它。
+// 这种错 `node --check` 查不出来（它只解析语法、不解析 import 目标），要真跑才炸。
+import { loadChromium } from "./playwright.mjs";
 import { browserSearch } from "./browser-search.mjs";
 
 const argv = process.argv.slice(2);
@@ -69,32 +72,48 @@ try {
 
 	const deadline = Date.now() + deadlineMs;
 	let lastUrl = "";
-	let passed = false;
+	let sawJobsPage = false;
+	let blankSince = 0;
+	/**
+	 * 判据只有一个：**页面上自己发出了 joblist，而且 code 0**。
+	 *
+	 * 第一版用的是"URL 离开了 verify.html 就算过"，实测**会骗人**：
+	 * 用户那次根本没撞 verify.html，直接进了 /web/geek/jobs，于是立刻报"✓ 已通过"，
+	 * 可页面一条 joblist 都没发，最后还落到了 about:blank。
+	 * "离开验证页"离"能用"还差得远 —— 只有抓到真数据才算数。
+	 */
 	while (Date.now() < deadline) {
 		await page.waitForTimeout(1000);
 		const url = page.url();
 		if (url !== lastUrl) {
 			lastUrl = url;
 			const onWall = url.includes("verify.html") || url.includes("/web/passport/");
-			console.log(`  ${new Date().toTimeString().slice(0, 8)}  ${onWall ? "⚠ 还在验证页" : "✓ 已离开验证页"}  ${url.slice(0, 110)}`);
+			const blank = url === "about:blank" || url === "";
+			console.log(`  ${new Date().toTimeString().slice(0, 8)}  ${onWall ? "⚠ 验证页" : blank ? "⚠ 页面变空白" : "→"}  ${url.slice(0, 110)}`);
+			if (blank) blankSince = Date.now();
+			else blankSince = 0;
 		}
-		if (!url.includes("verify.html") && !url.includes("/web/passport/") && url.includes("zhipin.com")) passed = true;
-		// 页面上自己发了 joblist 且 code=0，那就是最硬的证据
-		if (sawJobList?.code === 0) { passed = true; break; }
-		if (passed && sawJobList !== null) break;
+		if (url.includes("/web/geek/jobs") || url.includes("/web/geek/job-recommend")) sawJobsPage = true;
+		if (sawJobList?.code === 0) break;
+		// 页面白了好一会儿，也发了 joblist 但 code 不是 0 —— 不用再等了
+		if (blankSince !== 0 && Date.now() - blankSince > 8000) break;
 	}
 
-	if (!passed) {
-		console.log(`\n✗ ${Math.round(deadlineMs / 1000)}s 内没等到验证通过。`);
-		console.log(`  常见原因：`);
-		console.log(`   1. 没做完验证（窗口还停在 verify.html）；`);
-		console.log(`   2. 代理把 zhipin.com 走了国外出口 → 换个节点，或加 --direct 直连再试；`);
-		console.log(`   3. Boss 就是不放行这个 profile —— 那就用你自己日常那个 Chrome 登录 Boss，`);
-		console.log(`      工作台这边只做"读"（余额、简历库、话术预览），别指望自动抓。`);
+	if (sawJobList?.code !== 0) {
+		console.log(`\n✗ 没成功。判据是"页面自己发出 joblist 且 code 0"，这次没达到。`);
+		if (sawJobsPage) {
+			console.log(`  但它**确实进到了岗位页**，也没撞 verify.html —— 说明拦路的不是那道真人验证墙，`);
+			console.log(`  而是 Boss 的网页端压根不认这个 profile 的登录态（页面最后落到了 ${page.url() || "空"}）。`);
+			console.log(`  这跟 header.json 里 isLogin=false 是同一个信号：`);
+			console.log(`  接口认这套 cookie（getUserInfo code 0），网页端不认。`);
+		}
+		if (sawJobList !== null) console.log(`  页面上发出的 joblist: code=${sawJobList.code} ${sawJobList.msg ?? ""}`);
+		else console.log(`  页面上一条 joblist 都没发出来。`);
+		console.log(`\n  这种情况下**继续重试没有意义**，而且会让风控分数更高。`);
+		console.log(`  建议就停在这儿：等一段时间（几小时起）再试，别连着打。`);
 		process.exit(2);
 	}
-	console.log("\n✓ 验证已通过，落点不在验证页了。");
-	if (sawJobList !== null) console.log(`  页面上自己发的 joblist: code=${sawJobList.code} ${sawJobList.msg ?? ""} jobList=${sawJobList.n ?? "—"}`);
+	console.log(`\n✓ 成功：页面自己发出了 joblist，code=0，${sawJobList.n ?? 0} 条。`);
 } finally {
 	await ctx.close();
 }
