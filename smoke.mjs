@@ -436,6 +436,19 @@ check(flagged.join("\n").includes("重新连接 Chrome") && flagged.join("\n").i
 const okGate = render(mainEntry.component, {}, { 0: "j1", 14: { open: true, qr: "x", phase: "logged-in", error: null } });
 check(okGate.join("\n").includes("开始用"), "登录成功后给「开始用」收掉弹窗");
 
+// 连不上 Chrome 时不该催人扫码 —— 该说清楚哪一步断了、怎么修
+// （这里刻意不复用后面才定义的 REAL：这条用例只关心说明带怎么渲染）
+const offlineView = render(mainEntry.component, {}, {
+	0: "j1",
+	7: { ok: true, offline: { reason: "没有找到可复用的 Chrome 调试会话（http://127.0.0.1:9222）", code: "CDP_UNAVAILABLE" } },
+});
+const offlineText = offlineView.join("\n");
+check(offlineText.includes("连不上本机 Chrome 调试会话"), "连不上 Chrome 时给一条说明带，而不是等扫码");
+check(offlineText.includes("CDP_UNAVAILABLE") && offlineText.includes("9222"), "说明带带上错误码与调试端口，便于自查");
+check(offlineText.includes("--remote-debugging-port=9222"), "说明带给出可执行的修法");
+check(offlineText.includes("重新连接") && offlineText.includes("先不管"), "说明带能重连也能先不管（不挡着用已有的岗位库）");
+check(!offlineText.includes("在真实 Chrome 标签中完成扫码"), "连不上时不能催扫码（那个码根本不存在）");
+
 console.log("\n── 14. 找岗位（真实数据 + 搜索入口）──");
 // hook 7 = GET /boss/state 的结果。这一段专门盯"列表到底跟着谁走"。
 const REAL = {

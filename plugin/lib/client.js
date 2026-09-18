@@ -1013,11 +1013,21 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 		 * 独立成组件（而不是塞进 WorkbenchPage），这样 WorkbenchPage 的 hook 序号不变，
 		 * 测试里那些按序号驱动的用例不会被我改坏。
 		 */
-		function LoginGate({ onLoggedIn, reloadKey }) {
+		function LoginGate({ onLoggedIn, onUnavailable, reloadKey }) {
 			const [gate, setGate] = react.useState({ open: false, qr: null, phase: "idle", error: null, detail: null });
 			const [dismissed, setDismissed] = react.useState(false);
 
-			// 挂载时问一次登录态；没登录就把二维码顶上来。
+			/** 只有这几种 phase 是"用户真的能去登录"；其余都是在解释故障。 */
+			const canLogIn = (phase) => phase === "waiting-browser" || phase === "connecting-browser" || phase === "idle" || phase === "verifying";
+
+			// 挂载时问一次登录态。
+			//
+			// ⚠️ 闸门**只在真的能登录时**才顶上来（见 canLogIn）。
+			// 之前的写法是"只要不是 loggedIn 就弹"—— 于是 Chrome 根本没开调试口的时候，
+			// 用户看到的是一句"请在真实 Chrome 标签中完成扫码"加一个空二维码位，
+			// 看起来像插件在等他扫码，实际上是连都连不上。那种情况下应该解释原因，
+			// 而不是催他扫一个不存在的码。
+			//
 			// reloadKey 变化（= 刚点了退出登录）也会重跑一遍，所以"退出"之后闸门会自己弹回来。
 			react.useEffect(() => {
 				let alive = true;
@@ -1025,7 +1035,10 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					try {
 						const st = await fetch("/boss/login/state", { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null));
 						if (!alive || st === null) return;
-						if (st.loggedIn === true) return;
+						if (st.loggedIn === true) {
+							onUnavailable?.(null);
+							return;
+						}
 						const started = await fetch("/boss/login/start", { method: "POST", credentials: "same-origin" }).then((r) => r.json());
 						if (!alive) return;
 						// 宿主说"登录成功"，但这个闸门**正是因为 state 说没登录才打开的**。
@@ -1038,13 +1051,19 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 							if (again?.loggedIn !== true) {
 								const fresh = await fetch("/boss/login/start?force=1", { method: "POST", credentials: "same-origin" }).then((r) => r.json());
 								if (!alive) return;
-								setGate({ open: true, qr: fresh.qr ?? null, phase: fresh.phase ?? "failed", error: fresh.error ?? null, detail: fresh.detail ?? null });
+								if (canLogIn(fresh.phase)) setGate({ open: true, qr: fresh.qr ?? null, phase: fresh.phase ?? "failed", error: fresh.error ?? null, detail: fresh.detail ?? null });
+								else reportUnavailable(fresh, st);
 								return;
 							}
 						}
-						setGate({ open: true, qr: started.qr ?? null, phase: started.phase ?? "failed", error: started.error ?? null, detail: started.detail ?? null });
+						if (canLogIn(started.phase)) {
+							setGate({ open: true, qr: started.qr ?? null, phase: started.phase ?? "failed", error: started.error ?? null, detail: started.detail ?? null });
+						} else {
+							// 连不上 Chrome / 撞风控：不催扫码，改成工作台里一条可读的说明带
+							reportUnavailable(started, st);
+						}
 					} catch (err) {
-						if (alive) setGate({ open: true, qr: null, phase: "failed", error: String(err?.message ?? err), detail: null });
+						if (alive) onUnavailable?.({ reason: String(err?.message ?? err), code: "GATE_ERROR", at: Date.now() });
 					}
 				})();
 				return () => {
@@ -1063,6 +1082,8 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 						// 安全验证要开一次浏览器，没有它用户只能看着转圈猜是不是卡死了。
 						setGate((cur) => ({ ...cur, phase: s.phase ?? cur.phase, error: s.error ?? null, detail: s.detail ?? null }));
 						if (s.phase === "logged-in") onLoggedIn();
+						// 连上了/登录了就把"连不上"那条说明带撤掉
+						if (s.phase === "logged-in" || s.phase === "waiting-browser" || s.phase === "verifying") onUnavailable?.(null);
 					} catch { /* 下一轮再试 */ }
 				}, 2000);
 				return () => clearInterval(id);
@@ -1080,8 +1101,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					"div",
 					{ className: "bw_gateCard" },
 					h("div", { className: "bw_gateTitle" }, gate.phase === "logged-in" ? "已绑定 Boss 浏览器会话" : "连接真实 Chrome 登录 Boss"),
-					h("div", { className: "bw_gateSub" }, gate.phase === "logged-in" ? "搜索、JD 和监听都会复用这个页面，不会另开无头浏览器。" : "先用 --remote-debugging-port=9222 启动 Chrome，再在该 Chrome 中打开并登录 Boss。插件不会伪造机器指纹。"),
-					h(
+					h("div", { className: "bw_gateSub" }, gate.phase === "logged-in" ? "搜索、JD 和监听都会复用这个页面，不会另开无头浏览器。" : "先用 --remote-debugging-port=9222 启动 Chrome，再在该 Chrome 中打开并登录 Boss。插件不会伪造机器指纹。"),					h(
 						"div",
 						{ className: "bw_gateQr" },
 						gate.qr === null
@@ -1391,6 +1411,9 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 			const [selectedResume, setSelectedResume] = react.useState(null);
 			const [libCollapsed, setLibCollapsed] = react.useState(false);
 			const [uploads, setUploads] = react.useState([]);
+			// 连不上 Chrome 时的那条说明带。挂 remote 上（不新增 useState，保 hook 序号）。
+			const offline = remote?.offline ?? null;
+			const dismissOffline = () => setRemote((cur) => ({ ...(cur ?? {}), offline: null }));
 			// 本地假定时器在 §16.5 之后已经没有了（所有动作都走真请求），
 			// 但这个 ref + cleanup 留着：子组件的 effect 也可能登记进来的东西，
 			// 卸载时统一清掉比"等别人想起来清"安全。
@@ -1645,12 +1668,17 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					greetText: j?.greeting?.text ?? cur?.greetText ?? null,
 				}));
 			};
-
 			/** 发送打招呼。`text` 就是输入框里那段 —— 必须原样发出去。 */
 			const sendGreetingNow = async (id, text) => {
 				if (remote?.greet?.running === true) return;
 				const body = String(text ?? "").trim();
 				const who = apps.find((a) => a.id === id);
+				// 空话术不发：以前这里会把空串发出去，宿主再自己 buildGreeting 兜底，
+				// 结果"生成话术"如果失败（简历库还是空的），就是一次莫名其妙的线上请求。
+				if (body === "") {
+					setRemote((cur) => ({ ...(cur ?? {}), greet: { running: false, jobId: id, ok: false, error: "还没有话术：先点「生成话术」（需要简历库里有一份解析成功的简历），或者自己写一句再发。" } }));
+					return;
+				}
 				// eslint-disable-next-line no-alert
 				if (typeof confirm === "function" && !confirm(`给「${who?.company ?? ""} ${who?.title ?? ""}」发这条打招呼？\n\n${body}\n\n（只发消息，不会替你上传附件简历。）`)) return;
 				setRemote((cur) => ({ ...(cur ?? {}), greet: { running: true, jobId: id, error: null } }));
@@ -1711,10 +1739,11 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 
 			const applyAction = (id, what) => {
 				// 确认发送 = 把当前打招呼语真的发出去（不含附件简历）。
+				// 发的是**输入框里那段**：你改过就用你改的，没改就是生成的那段。
+				// 空的话 sendGreetingNow 会告诉你先去生成，不会发空消息上线。
 				if (what === "send" || what === "retry") {
 					const current = apps.find((a) => a.id === id);
 					const text = (remote?.greet?.jobId === id ? remote?.greet?.text : null) ?? remote?.greetText ?? current?.greeting ?? "";
-					if (remote?.greet?.jobId !== id || remote?.greet?.text == null) generateGreeting(id);
 					sendGreetingNow(id, text);
 					return;
 				}
@@ -1947,6 +1976,38 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 							),
 						)
 					: null,
+				// 连不上 Chrome：说清楚是哪一步断了、怎么修，而不是弹一个等扫码的框 ——
+				// 那种框会让人以为"扫一下就好了"，实际是调试口根本没开。
+				offline !== null && offline.reason
+					? h(
+							"div",
+							{ className: "bw_scrape bw_scrapeBad" },
+							h("span", { className: "bw_scrapeDot" }),
+							h(
+								"span",
+								null,
+								"连不上本机 Chrome 调试会话" +
+									(offline.code ? `（${offline.code}）` : "") +
+									`：${offline.reason}` +
+									"　·　修法：先完全退出 Chrome，再用 --remote-debugging-port=9222 启动，然后在该 Chrome 里打开并登录 Boss。" +
+									"工作台里已经抓到的岗位、简历库和监听条件都还在，不受影响。",
+							),
+							h(
+								"button",
+								{
+									type: "button",
+									className: "bw_btn",
+									onClick: async () => {
+										dismissOffline();
+										await postJson("/boss/login/start", { force: true });
+										loadState();
+									},
+								},
+								"重新连接",
+							),
+							h("button", { type: "button", className: "bw_btn", onClick: dismissOffline }, "先不管"),
+						)
+					: null,
 				// 退出登录的结果条（成功/失败各说各的，别让按钮点下去没交代）
 				logout !== null && logout.running !== true && logout.at !== undefined
 					? h(
@@ -2053,7 +2114,11 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					),
 				),
 				// 登录闸门放最后：它的 hook 排在简历库之后，前面那些按序号驱动的用例不受影响
-				h(LoginGate, { onLoggedIn: loadState, reloadKey: remote?.logout?.at ?? 0 }),
+				h(LoginGate, {
+					onLoggedIn: loadState,
+					onUnavailable: (info) => setRemote((cur) => ({ ...(cur ?? {}), offline: info })),
+					reloadKey: remote?.logout?.at ?? 0,
+				}),
 			);
 		}
 		//#endregion
