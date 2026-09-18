@@ -14,10 +14,51 @@ Boss 直聘求职流水线的 DSH 工作台插件。它把岗位搜索、完整 
 - 本地解析 PDF、docx、Markdown 等简历并生成结构化索引。
 - 按 JD 润色结构化简历：前置匹配技能/经历，逐段给出 before → after，只使用原简历已有事实，明确列出缺口。
 - 显式读取当前岗位对应的 Boss 会话和最近消息（会话列表 → 最近消息 → `getBossData` → 历史消息，带 `maxMsgId` 翻页）。
-- 基于结构化简历、JD 和当前会话生成回复草稿；草稿可在界面里改，确认后**真的发给 Boss**（MQTT，见下）。
+- **用模型写"待发送的句子"**：给定「JD + 我的结构化简历 + 当前会话」，生成 2–3 条候选回复。
+- 句子填进输入框可以随便改，**你按「发送给 HR」才真的发出去**；发完能读到 HR 的回复，再点「刷新并换一句」生成下一句。
 - 打招呼：用「简历 + JD」生成话术，你可以直接改，改完的话术会被原样发出。
 
 参考项目仅用于理解接口和流程；本仓库没有 import、调用或依赖它们的代码。
+
+## 回复是怎么工作的（模型只写句子，发送由你按）
+
+这条链上**模型只做一件事**：把"该回什么"写成一句可以原样发送的中文。它不跟 HR 对话、
+不决定要不要回、不自动循环、更不发送。整条链路是：
+
+```text
+读会话 ──► 模型写句子 ──► 你看到/可以改 ──► 你按「发送给 HR」 ──► 消息到 HR
+   ▲                                                                  │
+   └──────────── 点「刷新并换一句」，把 HR 的最新回复读回来 ◄───────────┘
+```
+
+具体分工：
+
+| 步骤 | 谁做的 | 代码 |
+|---|---|---|
+| 读会话（含 HR 最新回复） | 协议调用，**不经过模型** | `boss/messages.mjs` 的 `fetchConversation` |
+| 判断"要不要我回"、阶段是面试/薪资/简历 | 规则，稳定且可离线测 | `boss/career-assistant.mjs` 的 `buildReplyAdvice` |
+| 写出候选句子 | **模型**（DeepSeek `deepseek-chat`） | `boss/reply-llm.mjs` 的 `draftWithLlm` |
+| 发送 | **只有你按下按钮** | `boss/messages.mjs` 的 `sendReply` + `boss/mqtt-chat.mjs` |
+
+模型写句子时被写死的三条硬约束（`boss/reply-llm.mjs` 的 `SYSTEM_PROMPT`）：
+
+1. 只使用简历里的事实，**绝对不许编造**经历、技能、公司、头衔、数字；
+2. **不许替你承诺**薪资底线、入职时间、面试时间 —— 需要确认的一律写成提问；
+3. 只返回 JSON，每条 ≤120 字，不加 emoji / Markdown。
+
+规则那边还有两条**永远覆盖不掉**的禁令，会拼在模型结果后面一起显示：
+"不要虚构简历中不存在的经历、技能或数字"、"不要在未确认前承诺入职时间、薪资底线或面试安排"。
+
+**降级是可见的。** 没有 key、请求失败、模型没吐 JSON —— 一律退回规则模板，
+并在界面上把标签从「模型写的（deepseek-chat）」换成红色的「模板句（模型没参与）」，
+同时把原因写在下面。不会让人误以为模板是模型写的。
+
+想只用模型、不接受降级，就在请求里给 `engine: "model"`（界面默认是 `"auto"`，
+模型挂了退回模板；`"rules"` 则完全不走模型）。
+
+key 从哪来：宿主凭据服务的 `DEEPSEEK_API_KEY` / `deepseek-official`，
+退不回就读 `~/.dsh/.credentials.yaml`。**key 只在宿主侧用，不下发到浏览器**
+（浏览器直连 `api.deepseek.com` 也会被 CORS 挡掉）。
 
 ## 发消息是怎么走的（唯一写操作）
 
@@ -217,7 +258,8 @@ boss/detail.mjs            单条 JD 详情（一次请求同时带 securityId �
 boss/watch.mjs             监听保存、间隔限制和增量去重
 boss/messages.mjs          沟通列表、最近消息、会话历史、阶段摘要、发消息
 boss/mqtt-chat.mjs         MQTT over WSS + Protobuf 编码器（真正把消息发出去）
-boss/career-assistant.mjs  结构化简历润色和上下文回复建议
+boss/reply-llm.mjs         用模型写"待发送的句子"（prompt / JSON 容错 / 降级）
+boss/career-assistant.mjs  简历润色、阶段判断、规则版兜底句子
 boss/parse.mjs             本地简历解析
 boss/resumes.mjs           简历索引
 ```
@@ -229,7 +271,11 @@ npm test
 ```
 
 标准测试全部离线：UI 冒烟、浏览器通道契约、风控分类、JD 映射、监听去重、简历润色、
-会话归一化、回复建议、简历解析和 import 检查。它们不会登录或访问 Boss。
+会话归一化、模型 prompt 与 JSON 容错、简历解析和 import 检查。它们不会登录或访问 Boss。
+
+模型那部分也是离线的：`boss/contract.test.mjs` 注入假的 `fetch` 与假的 key，
+断言 prompt 里带了什么、模型吐出的畸形 JSON 怎么处理、失败时降级标签对不对 ——
+**不需要真调用模型，也不消耗额度**。
 
 `boss/contract.test.mjs` 专门盯**接口契约**：路径、参数名、响应字段名、筛选字典的每个码，
 以及 MQTT/Protobuf 的字段号和 CONNECT/CONNACK 字节布局。它拦的是"参数名记错但代码不报错、

@@ -526,16 +526,35 @@ const assisted = render(mainEntry.component, {}, {
 				messages: [{ direction: "incoming", text: "明天下午方便面试吗？" }],
 				thread: { friendId: 605029326, bossName: "李女士", company: "某某科技" },
 			},
-			reply: { drafts: [{ style: "简洁专业", text: "您好，明天下午可以，方便确认具体时间和面试形式吗？" }] },
+			reply: { drafts: [{ style: "简洁专业", text: "您好，明天下午可以，方便确认具体时间和面试形式吗？" }], engine: "model", model: "deepseek-chat", needsReply: true, intent: "约面试", avoid: ["不要承诺入职时间"], keyPoints: ["确认时间"] },
 		},
 	},
 });
 const assistedText = assisted.join("\n");
 check(assistedText.includes("简历润色结果") && assistedText.includes("不应写进简历"), "展示按 JD 润色结果与真实性警告");
 check(assistedText.includes("原：") && assistedText.includes("改："), "润色结果给出逐段 before → after，而不是只说「已优化」");
-check(assistedText.includes("发送给 Boss") && assistedText.includes("605029326"), "回复草稿有真正的发送入口，并指名发给谁（不再只能复制）");
+check(assistedText.includes("发送给 HR") && assistedText.includes("605029326"), "回复句子有真正的发送入口，并指名发给谁（不再只能复制）");
+check(assistedText.includes("模型写的"), "标出这句话是模型写的（而不是模板）");
+check(assistedText.includes("只有你按这一下才会发出去"), "说清楚发送必须由人按，插件不会自己发");
+check(assistedText.includes("对方意思："), "带上模型对 HR 最新一句的理解，便于人核对");
 check(assistedText.includes("生成话术") && assistedText.includes("发送打招呼"), "打招呼语有生成与发送两个入口");
-check(assistedText.includes("Boss：明天下午方便面试吗？") && assistedText.includes("方便确认具体时间"), "展示当前岗位会话与基于上下文的回复草稿");
+check(assistedText.includes("HR：明天下午方便面试吗？") && assistedText.includes("方便确认具体时间"), "展示当前岗位会话与基于上下文的回复草稿");
+
+// 模型失败时必须如实标成模板，不能让人以为那是模型写的
+const rulesOnly = render(mainEntry.component, {}, {
+	0: "BJ1",
+	7: {
+		...REAL,
+		assistant: {
+			jobId: "BJ1", running: false,
+			conversation: { messages: [{ direction: "incoming", text: "方便聊聊吗" }], thread: { friendId: 7, bossName: "李女士" } },
+			reply: { engine: "rules", engineError: "没找到 DeepSeek API key", needsReply: true, drafts: [{ style: "简洁专业", text: "您好，收到。" }], avoid: ["不要虚构"] },
+		},
+	},
+}).join("\n");
+check(rulesOnly.includes("模板句（模型没参与）"), "模型不可用时如实标成模板句");
+check(rulesOnly.includes("没找到 DeepSeek API key"), "把降级原因摆出来，而不是静默用模板");
+check(rulesOnly.includes("不要虚构"), "硬约束始终显示");
 
 // 演示岗位不能操作：点了只会 404，所以直接说清楚，并把按钮禁掉
 const demoDetail = render(mainEntry.component, {}, { 0: "j1" }).join("\n");

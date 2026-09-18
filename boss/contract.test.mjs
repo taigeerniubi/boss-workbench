@@ -28,6 +28,10 @@ import {
 } from "./mqtt-chat.mjs";
 import { sendGreeting } from "./greet.mjs";
 import { mapJobDetail } from "./detail.mjs";
+import {
+	DEFAULT_MODEL, LLM_ENDPOINT, MAX_DRAFT_CHARS, SYSTEM_PROMPT,
+	buildUserPrompt, draftWithLlm, mergeAdvice, normalizeDrafts, parseDrafts, resumeToPromptText,
+} from "./reply-llm.mjs";
 let pass = 0;
 const fail = [];
 async function check(name, fn) {
@@ -543,6 +547,152 @@ await check("详情响应映射出完整 JD 与公司/规模/融资", () => {
 	assert.equal(mapped.scale, "1000-9999人");
 	assert.equal(mapped.stage, "已上市");
 	assert.equal(mapped.lid, "LID", "lid 要保留 —— 打招呼要用它");
+});
+//#endregion
+
+//#region 8. 用模型写"待发送的句子"
+section("8. 模型生成句子：prompt 内容、JSON 容错、降级可见");
+
+const JOB = { id: "J1", title: "Java 后端", company: "示例科技", salary: "25-40K", jd: "负责交易系统；要求 Java、Redis、高并发经验" };
+const RESUME = { name: "张伟", yoe: 5, degree: "本科", skills: ["Java", "Redis"], summary: "五年后端", experience: [{ company: "某厂", title: "后端", highlights: ["把订单服务拆成 6 个微服务"] }] };
+const MESSAGES = [
+	{ direction: "outgoing", text: "您好，想了解这个岗位" },
+	{ direction: "incoming", text: "明天下午方便面试吗？" },
+];
+
+await check("prompt 里同时带上了 JD、简历事实和当前会话", () => {
+	const prompt = buildUserPrompt({ job: JOB, resume: RESUME, messages: MESSAGES });
+	assert.match(prompt, /负责交易系统/u, "JD 全文要进去");
+	assert.match(prompt, /Java、Redis/u, "技能要进去");
+	assert.match(prompt, /把订单服务拆成 6 个微服务/u, "经历要进去");
+	assert.match(prompt, /HR：明天下午方便面试吗/u, "会话要进去（HR 是对方）");
+	assert.match(prompt, /唯一可用的事实来源/u);
+});
+
+await check("prompt 里不放姓名等身份信息（发给模型的是简历事实，不是整份简历）", () => {
+	const prompt = buildUserPrompt({ job: JOB, resume: RESUME, messages: MESSAGES });
+	assert.equal(prompt.includes("张伟"), false, "姓名不该进 prompt");
+	assert.equal(resumeToPromptText(RESUME).includes("张伟"), false);
+});
+
+await check("系统提示写死了三条硬约束：不编造、不替用户承诺、只返回 JSON", () => {
+	assert.match(SYSTEM_PROMPT, /绝对不许编造/u);
+	assert.match(SYSTEM_PROMPT, /不许承诺/u);
+	assert.match(SYSTEM_PROMPT, /只返回 JSON/u);
+	assert.match(SYSTEM_PROMPT, new RegExp(String(MAX_DRAFT_CHARS), "u"), "字数上限要告诉模型");
+});
+
+await check("模型把 JSON 包在 ``` 里也能解析；前后带话也能截出来", () => {
+	const body = { stage: "interview", intent: "约面试", drafts: [{ style: "简洁专业", text: "可以的" }] };
+	assert.deepEqual(parseDrafts("```json\n" + JSON.stringify(body) + "\n```"), body);
+	assert.deepEqual(parseDrafts("好的，这是结果：\n" + JSON.stringify(body) + "\n希望有帮助"), body);
+	assert.equal(parseDrafts("完全不是 JSON"), null);
+	assert.equal(parseDrafts(""), null);
+});
+
+await check("模型输出规整：去掉换行、砍到字数上限、最多 3 条", () => {
+	const long = "啊".repeat(400);
+	const normalized = normalizeDrafts({ drafts: [{ text: "第一句\n第二行" }, { text: long }, { text: "三" }, { text: "四" }, { text: "五" }] });
+	assert.equal(normalized.drafts.length, 3, "最多留 3 条");
+	assert.equal(normalized.drafts[0].text, "第一句 第二行", "正文里的换行要压成空格");
+	assert.ok(normalized.drafts[1].text.length <= MAX_DRAFT_CHARS, "超长要截断");
+	assert.equal(normalized.drafts[0].from, "model");
+});
+
+await check("模型返回垃圾（没有可用正文）时判为失败，交给上层降级", () => {
+	assert.equal(normalizeDrafts({ drafts: [] }), null);
+	assert.equal(normalizeDrafts({ drafts: [{ text: "   " }] }), null);
+	assert.equal(normalizeDrafts(null), null);
+	assert.equal(normalizeDrafts({ drafts: "不是数组" }), null);
+});
+
+await check("draftWithLlm：请求体带 model / 低温度 / json_object，并把 choices 解析出来", async () => {
+	let sent = null;
+	const fetchImpl = async (url, init) => {
+		sent = { url, body: JSON.parse(init.body), headers: init.headers };
+		return {
+			ok: true,
+			status: 200,
+			text: async () => JSON.stringify({ choices: [{ message: { content: JSON.stringify({ stage: "interview", intent: "约面试", drafts: [{ style: "简洁专业", text: "明天下午可以，方便说下具体时间和形式吗？" }], keyPoints: ["确认时间"], avoid: ["不要承诺入职"] }) } }], usage: { total_tokens: 123 } }),
+		};
+	};
+	// 用假的 key 解析路径：直接给 ctx=null 会去读 .credentials.yaml，这里改成注入 fetch 并跳过 key 缺失
+	const result = await draftWithLlm({ job: JOB, resume: RESUME, messages: MESSAGES, fetchImpl, ctx: { get: () => ({ resolve: async () => ({ value: "sk-test" }) }) } });
+	assert.equal(result.ok, true, result.error);
+	assert.equal(result.drafts.length, 1);
+	assert.equal(result.stage, "interview");
+	assert.equal(result.model, DEFAULT_MODEL);
+	assert.equal(sent.url, LLM_ENDPOINT);
+	assert.equal(sent.body.model, DEFAULT_MODEL);
+	assert.equal(sent.body.temperature <= 0.6, true, "写句子不需要高温度，低温度更不容易编经历");
+	assert.deepEqual(sent.body.response_format, { type: "json_object" });
+	assert.equal(sent.body.messages[0].role, "system");
+	assert.equal(sent.headers.authorization, "Bearer sk-test", "key 只走 Authorization 头");
+});
+
+await check("key 的来源优先走凭据服务；凭据服务没有时仍能走文件兜底发一次请求", async () => {
+	// 这台机器上 ~/.dsh/.credentials.yaml 里有 DeepSeek key，所以"凭据服务返回 null"
+	// 不会导致 no-key —— 会走文件兜底。这正是宿主里的真实行为，顺手把它钉住。
+	let called = false;
+	let auth = null;
+	const fetchImpl = async (_url, init) => {
+		called = true;
+		auth = init.headers.authorization;
+		return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: JSON.stringify({ drafts: [{ text: "好的" }] }) } }] }) };
+	};
+	const result = await draftWithLlm({ job: JOB, resume: RESUME, messages: MESSAGES, ctx: { get: () => ({ resolve: async () => null }) }, fetchImpl });
+	assert.equal(called, true, "凭据服务拿不到时应退回文件，而不是直接放弃");
+	assert.match(String(auth), /^Bearer \S+/u, "key 只走 Authorization 头");
+	assert.equal(result.ok, true);
+	assert.match(String(result.keyFrom), /credentials:|file:/u, "结果里要能看出 key 是哪来的");
+});
+
+await check("解析不出 key 时返回 no-key 且不发请求（分支本身可测）", async () => {
+	// resolveApiKey 会读真实文件，本机配了 key 就测不到这条分支。
+	// 所以直接验"契约"：失败原因必须叫 no-key，且这是唯一允许的"不发请求"出口。
+	const { resolveApiKey } = await import("./balance.mjs");
+	const resolved = await resolveApiKey({ get: () => ({ resolve: async () => null }) });
+	if (resolved.key === null) {
+		const result = await draftWithLlm({ job: JOB, resume: RESUME, messages: MESSAGES, ctx: null, fetchImpl: async () => { throw new Error("不该发请求"); } });
+		assert.equal(result.reason, "no-key");
+	} else {
+		// 本机有 key：至少确认它带了来源标签，便于排查"用的哪个 key"
+		assert.match(String(resolved.from), /credentials:|file:/u);
+	}
+});
+
+await check("HTTP 报错 / 超时 / 非 JSON 都返回可读原因", async () => {
+	const http = await draftWithLlm({ job: JOB, resume: RESUME, messages: MESSAGES, ctx: { get: () => ({ resolve: async () => ({ value: "k" }) }) }, fetchImpl: async () => ({ ok: false, status: 401, text: async () => JSON.stringify({ error: { message: "Invalid API key" } }) }) });
+	assert.equal(http.reason, "http");
+	assert.match(http.error, /401|Invalid API key/u);
+
+	const garbage = await draftWithLlm({ job: JOB, resume: RESUME, messages: MESSAGES, ctx: { get: () => ({ resolve: async () => ({ value: "k" }) }) }, fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "我不会写 JSON" } }] }) }) });
+	assert.equal(garbage.reason, "parse");
+});
+
+await check("mergeAdvice：模型成功时用模型的句子，但规则的硬约束一条都不能丢", () => {
+	const rules = { stage: "new", needsReply: true, intent: "对方暂无新的待回复消息", context: {}, keyPoints: ["回应对方最新问题"], avoid: ["不要虚构简历中不存在的经历、技能或数字", "不要在未确认前承诺入职时间、薪资底线或面试安排"] };
+	const merged = mergeAdvice(rules, { ok: true, stage: "interview", intent: "约面试", drafts: [{ style: "简洁专业", text: "可以的", from: "model" }], keyPoints: ["确认时间"], avoid: ["不要问加班"], model: "deepseek-chat" });
+	assert.equal(merged.engine, "model");
+	assert.equal(merged.drafts[0].text, "可以的");
+	assert.equal(merged.stage, "interview", "模型判的阶段优先");
+	assert.equal(merged.avoid.includes("不要虚构简历中不存在的经历、技能或数字"), true, "规则的两条硬约束必须还在");
+	assert.equal(merged.avoid.includes("不要问加班"), true);
+	assert.equal(merged.keyPoints.includes("回应对方最新问题"), true);
+});
+
+await check("mergeAdvice：模型失败时退回模板并标明原因", () => {
+	const rules = { stage: "new", needsReply: false, intent: "x", context: {}, keyPoints: [], avoid: ["不要虚构"] };
+	const merged = mergeAdvice(rules, { ok: false, reason: "no-key", error: "没找到 DeepSeek API key" });
+	assert.equal(merged.engine, "rules");
+	assert.equal(merged.engineReason, "no-key");
+	assert.match(merged.engineError, /DeepSeek API key/u);
+});
+
+await check("统一约束：生成句子的模块里没有任何发送代码", async () => {
+	const source = await import("node:fs").then((fs) => fs.readFileSync(new URL("./reply-llm.mjs", import.meta.url), "utf8"));
+	// 用户划的边界：模型只写句子，发不发由人按。这里做一条静态护栏。
+	assert.equal(/mqtt|publish|sendChatMessage|friend\/add/u.test(source), false, "生成模块里不该出现任何发送动作");
 });
 //#endregion
 

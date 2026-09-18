@@ -843,14 +843,50 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 						h(
 							"div",
 							{ className: "bw_sect" },
-							h("div", { className: "bw_sectHead" }, h("span", null, "当前岗位会话与回复"), h("span", { className: "bw_spacer" }), h("button", { type: "button", className: "bw_btn", disabled: demo || assist?.running === true, onClick: () => onConversation?.(app.id) }, assist?.running && assist?.action === "conversation" ? "读取中…" : "读取会话并生成建议")),
+							h(
+								"div",
+								{ className: "bw_sectHead" },
+								h("span", null, "当前岗位会话与回复"),
+								h("span", { className: "bw_spacer" }),
+								h("button", { type: "button", className: "bw_btn", disabled: demo || assist?.running === true, onClick: () => onConversation?.(app.id) }, assist?.running && assist?.action === "conversation" ? "读取中…" : "读取会话并生成句子"),
+								assist?.conversation
+									? h("button", { type: "button", className: "bw_btn", disabled: demo || assist?.running === true, onClick: () => onConversation?.(app.id), title: "重新读一次会话（拿到 HR 的最新回复）并按新内容重写句子" }, "刷新并换一句")
+									: null,
+							),
 							assist?.conversation?.messages?.length
-								? h("div", { className: "bw_jd" }, assist.conversation.messages.slice(-8).map((message) => `${message.direction === "incoming" ? "Boss" : "我"}：${message.text}`).join("\n"))
+								? h("div", { className: "bw_jd" }, assist.conversation.messages.slice(-8).map((message) => `${message.direction === "incoming" ? "HR" : "我"}：${message.text}`).join("\n"))
 								: h("div", { className: "bw_dSub" }, demo ? "演示岗位没有会话，先抓真岗位。" : "不会自动读取；点击后才获取当前岗位会话。"),
-							...(assist?.reply?.drafts ?? []).map((draft, i) => h("div", { className: "bw_pick", key: "reply" + String(i) }, h("span", { className: "bw_pickNote" }, draft.style), h("span", { className: "bw_pickName" }, draft.text), h("button", { type: "button", className: "bw_btn", onClick: () => navigator.clipboard?.writeText(draft.text) }, "复制"))),
+							// 这句话是谁写的：模型 / 模板。降级必须看得见，不能让人以为模板是模型写的。
+							assist?.reply
+								? h(
+										"div",
+										{ className: "bw_pick" },
+										h("span", { className: assist.reply.engine === "model" ? "bw_pickNote" : "bw_pickNote bw_noteDanger" }, assist.reply.engine === "model" ? `模型写的（${assist.reply.model ?? "deepseek"}）` : "模板句（模型没参与）"),
+										h("span", { className: "bw_pickName" }, assist.reply.needsReply ? "对方在等你回" : "最新一条是你发的"),
+										assist.reply.intent ? h("span", { className: "bw_dSub" }, "对方意思：" + assist.reply.intent) : null,
+									)
+								: null,
+							assist?.reply?.engine === "rules" && assist.reply.engineError
+								? h("div", { className: "bw_dSub bw_noteDanger" }, "模型没参与的原因：" + assist.reply.engineError)
+								: null,
+							// 每条候选句子都能一键填进下面的输入框 —— 最终发什么由你定，可以再改。
+							...(assist?.reply?.drafts ?? []).map((draft, i) =>
+								h(
+									"div",
+									{ className: "bw_pick" + (i === 0 ? " bw_pickOn" : ""), key: "reply" + String(i) },
+									h("span", { className: "bw_pickNote" }, draft.style),
+									h("span", { className: "bw_pickName" }, draft.text),
+									h("button", { type: "button", className: "bw_btn", onClick: () => onReplyText?.(draft.text), title: "填进下面的输入框（还能改）" }, "用它"),
+									h("button", { type: "button", className: "bw_btn", onClick: () => navigator.clipboard?.writeText(draft.text) }, "复制"),
+								),
+							),
+							// 硬约束摆出来：这些是任何情况下都不该说的
+							(assist?.reply?.avoid ?? []).length > 0
+								? h("div", { className: "bw_dSub" }, "别忘： " + (assist.reply.avoid ?? []).join("；"))
+								: null,
 							// ── 真正把回复发出去 ────────────────────────────────────
 							// 求职端没有发消息的 HTTP 接口，宿主走 MQTT（boss/mqtt-chat.mjs）。
-							// 草稿不会自动发：必须点「发送给 Boss」再确认一次。
+							// 句子不会自动发：必须点「发送给 HR」再确认一次。
 							assist?.conversation?.thread?.friendId
 								? h(
 										"div",
@@ -858,26 +894,26 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 										h("textarea", {
 											className: "bw_ta",
 											value: replyText ?? (assist?.reply?.drafts?.[0]?.text ?? ""),
-											placeholder: "要发给这位 Boss 的话",
+											placeholder: "要发给这位 HR 的话（点上面的「用它」或自己写）",
 											onChange: (e) => onReplyText?.(e.target.value),
 										}),
 										h(
 											"div",
 											{ className: "bw_pick" },
-											h("span", { className: "bw_pickNote" }, "发给 " + (assist.conversation.thread.bossName || assist.conversation.thread.company || "这位 Boss")),
+											h("span", { className: "bw_pickNote" }, "发给 " + (assist.conversation.thread.bossName || assist.conversation.thread.company || "这位 HR")),
 											h("span", { className: "bw_pickName" }, "#" + String(assist.conversation.thread.friendId)),
 											h(
 												"button",
 												{
 													type: "button",
 													className: "bw_btn bw_btnPrimary",
-													disabled: sending === true || (replyText ?? "").trim() === "" && !(assist?.reply?.drafts?.[0]?.text ?? "").trim(),
+													disabled: sending === true || !(replyText ?? "").trim() && !(assist?.reply?.drafts?.[0]?.text ?? "").trim(),
 													onClick: () => onSendReply?.(app.id, assist.conversation.thread.friendId, replyText || assist?.reply?.drafts?.[0]?.text || ""),
 												},
-												sending === true ? "发送中…" : "发送给 Boss ▸",
+												sending === true ? "发送中…" : "发送给 HR ▸",
 											),
 										),
-										h("div", { className: "bw_dSub" }, "发送走 MQTT；宿主会拦掉 3 秒内的连发和 2 分钟内的同内容重发。"),
+										h("div", { className: "bw_dSub" }, "只有你按这一下才会发出去。发送走 MQTT；宿主会拦掉 3 秒内的连发和 2 分钟内的同内容重发。"),
 									)
 								: null,
 							assist?.sent ? h("div", { className: "bw_note" }, "已发送：" + assist.sent.text) : null,

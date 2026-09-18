@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { DATA_DIR, readJson, writeJson } from "./lib.mjs";
 import { readIndex, safeName } from "./resumes.mjs";
 import { summarizeConversation } from "./messages.mjs";
+import { draftWithLlm, mergeAdvice } from "./reply-llm.mjs";
 
 const KEYWORDS = [
 	"Java", "Spring Boot", "Spring Cloud", "Spring", "MyBatis", "MySQL", "PostgreSQL", "Redis", "Kafka", "RocketMQ",
@@ -63,6 +64,14 @@ export function tailorStructuredResume(structured, job) {
 	};
 }
 
+/**
+ * 规则版回复建议 —— **不联网、可离线测试**，也是模型不可用时的兜底。
+ *
+ * 分工：`boss/reply-llm.mjs` 负责用模型写句子，这里负责
+ *   1. 判断阶段与"要不要我回"（纯规则，稳定）；
+ *   2. 提供一组不依赖模型的模板句；
+ *   3. 给出两条硬约束（不虚构、不替用户承诺）—— 这两条任何情况下都不能被模型覆盖。
+ */
 export function buildReplyAdvice({ job, resume, messages }) {
 	const summary = summarizeConversation(messages);
 	const matched = (resume?.skills ?? []).filter((skill) => extractJobKeywords(job).some((keyword) => keyword.toLowerCase().includes(skill.toLowerCase()) || skill.toLowerCase().includes(keyword.toLowerCase()))).slice(0, 3);
@@ -96,20 +105,28 @@ export function buildReplyAdvice({ job, resume, messages }) {
 		needsReply: summary.needsReply,
 		intent: latestIncoming || "对方暂无新的待回复消息",
 		context: { jobTitle: job?.title ?? "", company: job?.company ?? "", resumeName: resume?.name ?? "", resumeSkills: resume?.skills ?? [], messageCount: messages?.length ?? 0 },
-		drafts: drafts.map((text, index) => ({ style: index === 0 ? "简洁专业" : "谨慎确认", text })),
+		drafts: drafts.map((text, index) => ({ style: index === 0 ? "简洁专业" : "谨慎确认", text, from: "rules" })),
 		keyPoints: uniq([matched.length ? `可证实的匹配技能：${matched.join("、")}` : null, summary.stage === "interview" ? "确认时间、形式、时长" : null, summary.needsReply ? "回应对方最新问题" : "避免无意义追问"]),
+		// 这两条是硬约束，mergeAdvice 会把它们和模型的 avoid 合并，永远不会被模型顶掉
 		avoid: ["不要虚构简历中不存在的经历、技能或数字", "不要在未确认前承诺入职时间、薪资底线或面试安排"],
 	};
 }
 
 const jobsFile = () => readJson(join(DATA_DIR, "jobs.json"), { jobs: [] }) ?? { jobs: [] };
+const findJob = (jobId) => (jobsFile().jobs ?? []).find((item) => item.id === jobId || item.encryptJobId === jobId) ?? null;
+
+/** 选简历：指定 → 默认 → 第一份能用的。润色和写句子共用同一套选择，别各写一份。 */
+function pickResume(index, name) {
+	const candidates = (index?.files ?? []).filter((file) => file.status === "parsed");
+	if (candidates.length === 0) return null;
+	if (typeof name === "string" && name !== "") return candidates.find((item) => item.name === name) ?? candidates[0];
+	return candidates.find((item) => item.name === index?.defaultResume) ?? candidates[0];
+}
 
 export function tailorResumeForJob(jobId, resumeName) {
-	const job = (jobsFile().jobs ?? []).find((item) => item.id === jobId || item.encryptJobId === jobId);
+	const job = findJob(jobId);
 	if (!job) return { ok: false, error: `岗位 ${jobId} 不在岗位库里` };
-	const index = readIndex();
-	const candidates = (index?.files ?? []).filter((file) => file.status === "parsed");
-	const file = candidates.find((item) => item.name === resumeName) ?? candidates.find((item) => item.name === index?.defaultResume) ?? candidates[0];
+	const file = pickResume(readIndex(), resumeName);
 	if (!file) return { ok: false, error: "简历库里没有解析成功的简历" };
 	const tailored = tailorStructuredResume(file.structured, job);
 	const storePath = join(DATA_DIR, "tailored-resumes.json");
@@ -120,12 +137,30 @@ export function tailorResumeForJob(jobId, resumeName) {
 	return { ok: true, item };
 }
 
-export function createReplyAdvice(jobId, resumeName, conversation) {
-	const job = (jobsFile().jobs ?? []).find((item) => item.id === jobId || item.encryptJobId === jobId);
+/**
+ * 生成"待发送的句子"。
+ *
+ * **默认走模型**（用户要的就是模型写句子）。模型不可用时退回规则模板，
+ * 并在结果里如实标出 `engine`，界面上会分开显示 —— 降级不能让用户以为
+ * 那几句话是模型写的。
+ *
+ * @param {string} jobId
+ * @param {string} resumeName
+ * @param {object} conversation  `/boss/messages/for-job` 的结果（含 messages）
+ * @param {{ engine?: "auto"|"model"|"rules", ctx?: object, fetchImpl?: Function }} [options]
+ */
+export async function createReplyAdvice(jobId, resumeName, conversation, { engine = "auto", ctx = null, fetchImpl = null } = {}) {
+	const job = findJob(jobId);
 	if (!job) return { ok: false, error: `岗位 ${jobId} 不在岗位库里` };
-	const index = readIndex();
-	const candidates = (index?.files ?? []).filter((file) => file.status === "parsed");
-	const file = candidates.find((item) => item.name === resumeName) ?? candidates.find((item) => item.name === index?.defaultResume) ?? candidates[0];
-	if (!file) return { ok: false, error: "简历库里没有解析成功的简历" };
-	return { ok: true, advice: buildReplyAdvice({ job, resume: file.structured, messages: conversation?.messages ?? [] }) };
+	const file = pickResume(readIndex(), resumeName);
+	if (!file) return { ok: false, error: "简历库里没有解析成功的简历（话术要基于简历事实，不能凭空写）" };
+	const messages = conversation?.messages ?? [];
+	const rules = buildReplyAdvice({ job, resume: file.structured, messages });
+
+	if (engine === "rules") return { ok: true, advice: { ...rules, engine: "rules", engineError: null, engineReason: "manual" } };
+
+	const ai = await draftWithLlm({ job, resume: file.structured, messages, ctx, fetchImpl });
+	// engine=model 是用户明确要求"必须模型"：这时不偷偷降级，把失败原因摆出来
+	if (engine === "model" && ai.ok !== true) return { ok: false, error: `${ai.error}（当前是「只用模型」模式，不会降级到模板）`, engine: "model", advice: { ...rules, engine: "rules", engineError: ai.error, engineReason: ai.reason } };
+	return { ok: true, advice: mergeAdvice(rules, ai) };
 }

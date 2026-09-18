@@ -201,8 +201,11 @@ async function handle(ctx, req, res) {
 		return sendJson(res, result.ok ? 200 : 400, result);
 	}
 	if (method === "POST" && path === "/assist/reply") {
-		const { jobId, resumeName, conversation } = await readJsonBody(req);
-		const result = createReplyAdvice(jobId, resumeName, conversation);
+		const { jobId, resumeName, conversation, engine } = await readJsonBody(req);
+		// engine: "auto"（默认，模型挂了退回模板）| "model"（只用模型）| "rules"（只出模板）
+		// ctx 要传进去：DeepSeek key 是宿主凭据服务给的，不能下发到浏览器。
+		// 这条路**只生成句子**，不发消息 —— 发送是 /boss/messages/reply，而且必须显式确认。
+		const result = await createReplyAdvice(jobId, resumeName, conversation, { engine: engine ?? "auto", ctx });
 		return sendJson(res, result.ok ? 200 : 400, result);
 	}
 
