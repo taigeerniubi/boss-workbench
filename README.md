@@ -141,9 +141,25 @@ Chrome 完全不受影响**）。失败了会在工作台里给一条说明带 +
 $env:BOSS_CDP_URL = "http://127.0.0.1:9222"
 $env:BOSS_CHROME_PATH = "D:\somewhere\chrome.exe"   # 指定用哪个浏览器
 $env:BOSS_AUTO_CHROME = "0"                          # 完全不自动拉起
+$env:BOSS_CHROME_MODE = "hidden"                     # 隐藏窗口运行（见下）
 ```
 
 安全限制：CDP 地址只允许 `localhost`、`127.0.0.1` 或 `::1`，防止把浏览器调试能力暴露给远端。
+
+### 不想看见那个浏览器窗口
+
+`BOSS_CHROME_MODE=hidden` 会让插件用 `--headless=new` 拉起浏览器：**没有窗口，但调试口、
+登录态、抓取和读会话都照常工作**。第一次要登录时临时去掉这个变量（用默认的可见窗口）、
+登完再切回来即可 —— 登录态存在 profile 里，之后不用再登。
+
+默认**不是** hidden，原因很实在：headless 这条路在开发机上**没能验证成功** ——
+受限环境里 Chrome 连自己的多进程 IPC 都起不来（crashpad 报 `OpenProcess 拒绝访问`、
+mojo `platform_channel` 直接 FATAL），所以任何"headless 能不能开调试口"的实测都被污染了。
+把一个自己验不了的模式设成默认，万一它是坏的，你会同时失去窗口和调试口。
+
+还有一条要说清楚：**关掉那个窗口＝断掉插件的通道**，因为那就是插件访问 Boss 用的连接。
+数据不会丢（都在本地），但抓取和读会话会失败，直到重新打开。想"不用看见它"就用隐藏模式，
+而不是关掉它。
 
 然后：
 
@@ -221,23 +237,28 @@ npm run scrape -- --city 北京 --query "后端开发" --pages 1 --yes
 
 ## 运行期数据
 
-默认全部放在仓库外：
+**全部在你本机，一处都不上传。** 默认目录：
 
 ```text
 ~/.dsh/boss-workbench/
   data/
-    session.json
-    jobs.json
-    watch.json
-    conversations.json
-    conversation-<friendId>.json
-    tailored-resumes.json
-    resumes.json
-    cooldown.json
-    sent-messages.json
-  resumes/
-  runs/
+    session.json             登录 cookie（敏感）
+    jobs.json                抓到的岗位
+    watch.json               监听条件
+    conversations.json       会话列表
+    conversation-<friendId>.json   聊天记录（敏感）
+    tailored-resumes.json    按 JD 润色后的简历
+    resumes.json             简历索引
+    cooldown.json            风控冷却
+    sent-messages.json       发出去的句子（流水）
+  resumes/                   你的简历原件
+  browser-profile/           那个可调试浏览器的登录态
+  runs/                      每次抓取的原始响应留档
 ```
+
+数据只会流向两个地方：**Boss 自己的接口**（zhipin.com，也就是你本来在用的那个站）
+和**生成句子时的 DeepSeek**（只发 JD + 结构化简历事实 + 会话文本，**不发姓名/电话/邮箱**）。
+没有第三方服务器，没有遥测。
 
 可用 `BOSS_HOME` 改位置。cookie、聊天记录和简历均属于敏感信息，不要复制进 Git 仓库。
 

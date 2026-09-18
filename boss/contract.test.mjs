@@ -33,7 +33,7 @@ import {
 	buildUserPrompt, draftWithLlm, mergeAdvice, normalizeDrafts, parseDrafts, resumeToPromptText,
 } from "./reply-llm.mjs";
 import {
-	browserCandidates, buildLaunchArgs, ensureDebuggableChrome, findLaunchable, probeCdp, realProfileDir, userDataDirFor,
+	browserCandidates, buildLaunchArgs, chromeMode, ensureDebuggableChrome, findLaunchable, probeCdp, realProfileDir, userDataDirFor,
 } from "./auto-chrome.mjs";
 import { navigateOnce, readNavLog, resetNavLogForTests } from "./loginflow.mjs";
 let pass = 0;
@@ -806,7 +806,8 @@ await check("一律用插件自己的 profile（非默认 profile 才绕得开 C
 	assert.equal(result.ok, true, result.error);
 	assert.equal(result.name, "Edge", "首选候选起不来就该换下一个候选");
 	assert.equal(result.reusedProfile, false);
-	assert.ok(attempts.length >= 2, `应该把候选都试一遍，实际 ${attempts.length} 次`);
+	assert.ok(attempts.length >= 1, "至少要真的试过拉起");
+	// 候选数取决于本机装了什么，所以不硬编码次数；这里断言的是"每次都用插件 profile"
 	assert.ok(attempts.every((a) => a.dir === "--user-data-dir=C:\\plugin-profile"), `每次都该用插件 profile，实际：${attempts.map((a) => a.dir).join(", ")}`);
 });
 
@@ -972,6 +973,36 @@ await check("静态护栏：loginflow 里不许有绕过冷却的裸 page.goto",
 	const bare = source.split("\n").filter((line) => /\.goto\(/u.test(line) && !/navigateOnce|page\.goto\(target/u.test(line));
 	assert.deepEqual(bare, [], `loginflow.mjs 里不该有裸 page.goto：${bare.join(" | ")}`);
 });
+await check("隐藏模式是显式开关，默认必须是已验证能用的可见窗口", () => {
+	// 默认 normal：headless 这条路我没能验证成功（受限 shell 里 Chrome 多进程起不来），
+	// 所以不能把它设成默认 —— 万一坏的，用户会同时失去窗口和调试口。
+	assert.equal(chromeMode({}), "normal");
+	assert.equal(chromeMode({ BOSS_CHROME_MODE: "normal" }), "normal");
+	assert.equal(chromeMode({ BOSS_CHROME_MODE: "HIDDEN" }), "hidden", "大小写不敏感");
+	assert.equal(chromeMode({ HEADLESS: "1" }), "normal", "别被别的变量名误触发");
+
+	const visible = buildLaunchArgs({ userDataDir: "P" });
+	assert.equal(visible.includes("--headless=new"), false, "默认不许加 headless");
+	const hidden = buildLaunchArgs({ userDataDir: "P", mode: "hidden" });
+	assert.equal(hidden[0], "--headless=new", "hidden 模式要加 --headless=new");
+	assert.ok(hidden.includes("--remote-debugging-port=9222"), "隐藏模式一样要给调试口");
+	assert.ok(hidden.includes("--user-data-dir=P"), "隐藏模式一样要用插件 profile（登录态要留住）");
+	assert.ok(hidden.some((a) => a.endsWith("/web/geek/jobs")), "隐藏模式也要先打开 Boss 页");
+});
+
+await check("拉起结果里带上用的是哪种模式，便于界面如实显示", async () => {
+	let up = false;
+	const result = await ensureDebuggableChrome({
+		userDataDir: "P",
+		waitMs: 1200,
+		fetchImpl: async () => { if (!up) throw new Error("down"); return { ok: true, json: async () => ({ Browser: "x" }) }; },
+		running: { known: true, chrome: false, edge: false },
+		spawnImpl: () => { setTimeout(() => { up = true; }, 150); return { unref() {} }; },
+	});
+	assert.equal(result.ok, true, result.error);
+	assert.equal(result.mode, "normal", "要能看出这次拉的是可见窗口还是隐藏的");
+});
+
 //#endregion
 
 console.log(`\n${"─".repeat(60)}`);

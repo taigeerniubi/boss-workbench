@@ -40,6 +40,22 @@ export const DEFAULT_PORT = 9222;
 export const LAUNCH_WAIT_MS = Number(process.env.BOSS_LAUNCH_WAIT_MS ?? 12000);
 export const autoChromeEnabled = () => process.env.BOSS_AUTO_CHROME !== "0";
 
+/**
+ * 拉起来的浏览器要不要显示窗口。
+ *
+ *   normal（默认）— 显示窗口。**这是已验证能用的那一种**：用户就是这么跑通的。
+ *   hidden        — 加 `--headless=new`，不放窗口，但调试口和登录态照常工作。
+ *
+ * 为什么默认是 normal 而不是 hidden：headless 这条路我**没能验证成功** ——
+ * 本机的受限 shell 里 Chrome 连正常多进程都起不来（crashpad 报 OpenProcess 拒绝访问、
+ * mojo platform_channel 直接 FATAL），所以任何"headless 能不能开调试口"的实测都被污染了。
+ * 把一个自己验不了的模式设成默认，万一它是坏的，用户就同时失去窗口和调试口。
+ * 想用就显式设 `BOSS_CHROME_MODE=hidden`，坏了大不了去掉这个变量。
+ */
+export const chromeMode = (env = process.env) => (String(env.BOSS_CHROME_MODE ?? "").toLowerCase() === "hidden" ? "hidden" : "normal");
+/** 隐藏模式要加的启动参数。 */
+export const headlessArgs = (mode) => (mode === "hidden" ? ["--headless=new"] : []);
+
 const chromePathFile = () => join(DATA_DIR, "chrome-path.json");
 
 /** 候选浏览器的定义。`running` 由调用方探测后注入，便于离线测试。 */
@@ -147,8 +163,9 @@ export async function detectRunning({ platform = process.platform, env = process
 }
 
 /** 拉起浏览器时的参数。单独导出便于测试断言。 */
-export function buildLaunchArgs({ port = DEFAULT_PORT, userDataDir, url = `${SITE}/web/geek/jobs` } = {}) {
+export function buildLaunchArgs({ port = DEFAULT_PORT, userDataDir, url = `${SITE}/web/geek/jobs`, mode = "normal" } = {}) {
 	return [
+		...headlessArgs(mode),
 		`--remote-debugging-port=${port}`,
 		"--remote-allow-origins=*",
 		`--user-data-dir=${userDataDir}`,
@@ -233,30 +250,32 @@ export async function ensureDebuggableChrome({
 	// 先试"当前没在跑"的候选（更干净），再试其余的；都用插件自己的 profile。
 	const ordered = [...free, ...all.filter((c) => !free.includes(c))];
 	const failures = [];
+	const mode = chromeMode();
 	const remember = (candidate) => { try { writeJson(chromePathFile(), { path: candidate.path, name: candidate.name, at: new Date().toISOString() }); } catch { /* 记不住也没关系 */ } };
 
 	for (const candidate of ordered) {
-		const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port, userDataDir, url: targetUrl, waitMs, fetchImpl });
+		const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port, userDataDir, url: targetUrl, waitMs, fetchImpl, mode });
 		if (attempt.ok) {
 			remember(candidate);
-			return { ok: true, launched: true, port, path: candidate.path, name: candidate.name, browser: attempt.browser, url: targetUrl, userDataDir, reusedProfile: false };
+			return { ok: true, launched: true, port, mode, path: candidate.path, name: candidate.name, browser: attempt.browser, url: targetUrl, userDataDir, reusedProfile: false };
 		}
-		failures.push(`${candidate.name}（端口 ${port}）：${attempt.error}`);
+		failures.push(`${candidate.name}（端口 ${port}${mode === "hidden" ? "，隐藏模式" : ""}）：${attempt.error}`);
 	}
 	// 换个端口 —— 9222 可能被别的调试器占着
 	const altPort = port === DEFAULT_PORT ? DEFAULT_PORT + 1 : DEFAULT_PORT;
 	for (const candidate of ordered) {
-		const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port: altPort, userDataDir, url: targetUrl, waitMs, fetchImpl });
+		const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port: altPort, userDataDir, url: targetUrl, waitMs, fetchImpl, mode });
 		if (attempt.ok) {
 			remember(candidate);
-			return { ok: true, launched: true, port: altPort, fallbackPort: true, path: candidate.path, name: candidate.name, browser: attempt.browser, url: targetUrl, userDataDir, reusedProfile: false };
+			return { ok: true, launched: true, port: altPort, fallbackPort: true, mode, path: candidate.path, name: candidate.name, browser: attempt.browser, url: targetUrl, userDataDir, reusedProfile: false };
 		}
-		failures.push(`${candidate.name}（端口 ${altPort}）：${attempt.error}`);
+		failures.push(`${candidate.name}（端口 ${altPort}${mode === "hidden" ? "，隐藏模式" : ""}）：${attempt.error}`);
 	}
 
 	return {
 		ok: false,
 		port,
+		mode,
 		tried,
 		failures,
 		candidates: all,
@@ -270,11 +289,11 @@ export async function ensureDebuggableChrome({
 	};
 }
 
-/** 试一次：拉起 + 等端口。port / userDataDir 都是参数，便于多轮重试。 */
-async function tryLaunch({ spawnImpl, path, name, port, userDataDir, url, waitMs, fetchImpl }) {
+/** 试一次：拉起 + 等端口。port / userDataDir / mode 都是参数，便于多轮重试。 */
+async function tryLaunch({ spawnImpl, path, name, port, userDataDir, url, waitMs, fetchImpl, mode = "normal" }) {
 	let child;
 	try {
-		child = spawnImpl(path, buildLaunchArgs({ port, userDataDir, url }), { detached: true, stdio: "ignore", windowsHide: false });
+		child = spawnImpl(path, buildLaunchArgs({ port, userDataDir, url, mode }), { detached: true, stdio: "ignore", windowsHide: false });
 		child?.unref?.();
 	} catch (err) {
 		return { ok: false, error: `启动 ${name} 失败：${String(err?.message ?? err)}` };
