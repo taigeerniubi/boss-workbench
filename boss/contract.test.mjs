@@ -33,7 +33,7 @@ import {
 	buildUserPrompt, draftWithLlm, mergeAdvice, normalizeDrafts, parseDrafts, resumeToPromptText,
 } from "./reply-llm.mjs";
 import {
-	browserCandidates, buildLaunchArgs, chromeMode, ensureDebuggableChrome, findLaunchable, probeCdp, realProfileDir, userDataDirFor,
+	browserCandidates, buildLaunchArgs, chromeMode, ensureDebuggableChrome, findLaunchable, headlessUserAgent, probeCdp, realProfileDir, sanitizeUserAgent, userDataDirFor,
 } from "./auto-chrome.mjs";
 import { navigateOnce, readNavLog, resetNavLogForTests } from "./loginflow.mjs";
 let pass = 0;
@@ -978,34 +978,90 @@ await check("静态护栏：loginflow 里不许有绕过冷却的裸 page.goto",
 	const bare = source.split("\n").filter((line) => /\.goto\(/u.test(line) && !/navigateOnce|page\.goto\(target/u.test(line));
 	assert.deepEqual(bare, [], `loginflow.mjs 里不该有裸 page.goto：${bare.join(" | ")}`);
 });
-await check("隐藏模式是显式开关，默认必须是已验证能用的可见窗口", () => {
-	// 默认 normal：headless 这条路我没能验证成功（受限 shell 里 Chrome 多进程起不来），
-	// 所以不能把它设成默认 —— 万一坏的，用户会同时失去窗口和调试口。
-	assert.equal(chromeMode({}), "normal");
-	assert.equal(chromeMode({ BOSS_CHROME_MODE: "normal" }), "normal");
-	assert.equal(chromeMode({ BOSS_CHROME_MODE: "HIDDEN" }), "hidden", "大小写不敏感");
-	assert.equal(chromeMode({ HEADLESS: "1" }), "normal", "别被别的变量名误触发");
+await check("默认隐藏窗口（已实测可用）；BOSS_CHROME_MODE=normal 才回到可见", () => {
+	// 2026-09-18 起默认 hidden：可见窗口会被用户顺手关掉，下次抓取又拉一个 —— 「开一下又关掉」。
+	// 隐藏模式已在本机验证：Edge 153 --headless=new + 插件 profile，调试口/登录态都正常。
+	assert.equal(chromeMode({}), "hidden");
+	assert.equal(chromeMode({ BOSS_CHROME_MODE: "hidden" }), "hidden");
+	assert.equal(chromeMode({ BOSS_CHROME_MODE: "NORMAL" }), "normal", "大小写不敏感");
+	assert.equal(chromeMode({ BOSS_CHROME_MODE: "visible" }), "normal", "visible 是 normal 的别名");
+	assert.equal(chromeMode({ HEADLESS: "0" }), "hidden", "别被别的变量名误触发");
 
-	const visible = buildLaunchArgs({ userDataDir: "P" });
-	assert.equal(visible.includes("--headless=new"), false, "默认不许加 headless");
-	const hidden = buildLaunchArgs({ userDataDir: "P", mode: "hidden" });
+	const visible = buildLaunchArgs({ userDataDir: "P", mode: "normal" });
+	assert.equal(visible.includes("--headless=new"), false, "normal 不许加 headless");
+	assert.equal(visible.some((a) => a.startsWith("--user-agent=")), false, "可见窗口不改 UA");
+	const hidden = buildLaunchArgs({ userDataDir: "P", mode: "hidden", userAgent: "UA-X" });
 	assert.equal(hidden[0], "--headless=new", "hidden 模式要加 --headless=new");
+	assert.ok(hidden.includes("--window-size=1440,900"), "隐藏模式要给正常屏幕尺寸（800×600 是无头特征）");
+	assert.ok(hidden.includes("--user-agent=UA-X"), "隐藏模式要覆盖 UA（默认会写 HeadlessChrome）");
 	assert.ok(hidden.includes("--remote-debugging-port=9222"), "隐藏模式一样要给调试口");
 	assert.ok(hidden.includes("--user-data-dir=P"), "隐藏模式一样要用插件 profile（登录态要留住）");
 	assert.ok(hidden.some((a) => a.endsWith("/web/geek/jobs")), "隐藏模式也要先打开 Boss 页");
+	const noUa = buildLaunchArgs({ userDataDir: "P", mode: "hidden", userAgent: null });
+	assert.equal(noUa.some((a) => a.startsWith("--user-agent=")), false, "拿不到版本就别拼一条错的 UA");
 });
 
-await check("拉起结果里带上用的是哪种模式，便于界面如实显示", async () => {
-	let up = false;
-	const result = await ensureDebuggableChrome({
-		userDataDir: "P",
-		waitMs: 1200,
-		fetchImpl: async () => { if (!up) throw new Error("down"); return { ok: true, json: async () => ({ Browser: "x" }) }; },
-		running: { known: true, chrome: false, edge: false },
-		spawnImpl: () => { setTimeout(() => { up = true; }, 150); return { unref() {} }; },
-	});
-	assert.equal(result.ok, true, result.error);
-	assert.equal(result.mode, "normal", "要能看出这次拉的是可见窗口还是隐藏的");
+await check("隐藏模式 UA：按 exe 旁版本目录拼成正常写法，Edge 带 Edg/ 尾巴，不含 HeadlessChrome", () => {
+	const readdir = (dir) => (/Edge/u.test(dir) ? ["152.0.4191.66", "153.0.4234.32", "msedge.exe"] : ["153.0.8010.48", "chrome.exe"]);
+	const edge = headlessUserAgent({ name: "Edge", path: "C:\\PF86\\Microsoft\\Edge\\Application\\msedge.exe", platform: "win32", readdir });
+	assert.match(edge, /^Mozilla\/5\.0 \(Windows NT 10\.0; Win64; x64\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/153\.0\.0\.0 Safari\/537\.36 Edg\/153\.0\.0\.0$/u, edge);
+	const chrome = headlessUserAgent({ name: "Chrome", path: "C:\\PF\\Google\\Chrome\\Application\\chrome.exe", platform: "win32", readdir });
+	assert.match(chrome, /Chrome\/153\.0\.0\.0 Safari\/537\.36$/u, chrome);
+	assert.equal(/HeadlessChrome/u.test(edge) || /HeadlessChrome/u.test(chrome), false);
+	// 版本目录读不到 → 退到 profile 的 Last Version
+	const viaLast = headlessUserAgent({ name: "Edge", path: "X:\\nowhere\\msedge.exe", platform: "win32", readdir: () => { throw new Error("ENOENT"); }, readFile: () => "151.0.1.2\n" });
+	assert.match(viaLast, /Chrome\/151\.0\.0\.0/u, viaLast);
+	assert.equal(sanitizeUserAgent("Mozilla/5.0 (X) HeadlessChrome/153.0.0.0 Safari/537.36"), "Mozilla/5.0 (X) Chrome/153.0.0.0 Safari/537.36");
+});
+
+await check("拉起结果里带上用的是哪种模式，便于界面如实显示；mode 参数能强制可见", async () => {
+	const run = async (opts) => {
+		let up = false;
+		const spawned = [];
+		const result = await ensureDebuggableChrome({
+			userDataDir: "P",
+			waitMs: 1200,
+			fetchImpl: async () => { if (!up) throw new Error("down"); return { ok: true, json: async () => ({ Browser: "x", "User-Agent": "Mozilla/5.0 HeadlessChrome/153.0.0.0" }) }; },
+			running: { known: true, chrome: false, edge: false },
+			spawnImpl: (_path, args) => { spawned.push(args); setTimeout(() => { up = true; }, 150); return { unref() {} }; },
+			...opts,
+		});
+		return { result, args: spawned[0] ?? [] };
+	};
+	const hidden = await run({});
+	assert.equal(hidden.result.ok, true, hidden.result.error);
+	assert.equal(hidden.result.mode, "hidden", "默认按环境变量 → hidden");
+	assert.ok(hidden.args.includes("--headless=new"));
+	const visible = await run({ mode: "normal" });
+	assert.equal(visible.result.ok, true, visible.result.error);
+	assert.equal(visible.result.mode, "normal", "扫码登录入口显式要可见窗口");
+	assert.equal(visible.args.includes("--headless=new"), false);
+});
+
+await check("connectExistingBossBrowser({visible}) 遇到无头实例：先让它退出，再以可见模式重拉", async () => {
+	const { connectExistingBossBrowser, resetAutoLaunchForTests, isHeadlessAt } = await import("./browser-channel.mjs");
+	// isHeadlessAt：UA 带 HeadlessChrome 或拉起记录说 hidden 都算无头
+	const upHeadless = async () => ({ ok: true, json: async () => ({ Browser: "x", "User-Agent": "Mozilla/5.0 HeadlessChrome/1" }) });
+	assert.deepEqual((await isHeadlessAt(9222, { fetchImpl: upHeadless, record: null })).headless, true);
+	const upClean = async () => ({ ok: true, json: async () => ({ Browser: "x", "User-Agent": "Mozilla/5.0 Chrome/1" }) });
+	assert.equal((await isHeadlessAt(9222, { fetchImpl: upClean, record: { mode: "hidden", port: 9222 } })).headless, true, "插件抹了 UA，靠记录判");
+	assert.equal((await isHeadlessAt(9222, { fetchImpl: upClean, record: { mode: "normal", port: 9222 } })).headless, false);
+	assert.equal((await isHeadlessAt(9222, { fetchImpl: async () => { throw new Error("down"); } })).up, false);
+
+	// 静态：loginflow 只在「没登录、要扫码」那一步才要 visible；抓取/读会话路径绝不要
+	const fs = await import("node:fs");
+	const loginSrc = fs.readFileSync(new URL("./loginflow.mjs", import.meta.url), "utf8");
+	assert.match(loginSrc, /visible: true/u, "startLogin 没登录时要换成可见实例");
+	for (const file of ["jobs.mjs", "detail.mjs", "messages.mjs"]) {
+		const text = fs.readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
+		assert.equal(/visible: true/u.test(text), false, `${file} 抓取路径不该要求可见窗口`);
+	}
+	// 静态：切换用的是 CDP Browser.close（浏览器自己正常退出），不是杀进程
+	const channelSrc = fs.readFileSync(new URL("./browser-channel.mjs", import.meta.url), "utf8");
+	assert.match(channelSrc, /Browser\.close/u);
+	for (const banned of ["taskkill", "pkill", "Stop-Process", ".kill("]) assert.equal(channelSrc.includes(banned), false, `不该出现 ${banned}`);
+	resetAutoLaunchForTests();
+	void connectExistingBossBrowser;
 });
 
 //#endregion

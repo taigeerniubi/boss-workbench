@@ -5,7 +5,7 @@
  * fetch。它不引用 boss-agent-cli 的包、文件或运行时。
  */
 import { loadChromium } from "./playwright.mjs";
-import { ensureDebuggableChrome } from "./auto-chrome.mjs";
+import { ensureDebuggableChrome, probeCdp, readLaunchRecord } from "./auto-chrome.mjs";
 import { SITE, effectiveCookieHeader } from "./lib.mjs";
 
 export const DEFAULT_CDP_URL = process.env.BOSS_CDP_URL ?? "http://127.0.0.1:9222";
@@ -66,18 +66,73 @@ let autoLaunchAttemptedAt = 0;
 const autoLaunchAllowed = () => Date.now() - autoLaunchAttemptedAt >= AUTO_LAUNCH_COOLDOWN_MS;
 
 /**
+ * 现在监听着的这个调试口，后面是不是**无头**实例。
+ *
+ * 两个判据取「或」：/json/version 回的 UA 带 HeadlessChrome（用户手动起的无头会露这个）；
+ * 或者插件自己的拉起记录说上次是 hidden 模式且端口一致（插件拉的会把 UA 抹掉，只能靠记录）。
+ */
+export async function isHeadlessAt(port, { fetchImpl = null, record = null } = {}) {
+	const probe = await probeCdp(port, { fetchImpl });
+	if (!probe.up) return { up: false, headless: false };
+	if (/HeadlessChrome/u.test(String(probe.userAgent ?? ""))) return { up: true, headless: true, why: "ua" };
+	const rec = record ?? readLaunchRecord();
+	if (rec?.mode === "hidden" && Number(rec.port) === Number(port)) return { up: true, headless: true, why: "record" };
+	return { up: true, headless: false };
+}
+
+/**
+ * 让调试口后面那个浏览器整个退出（CDP `Browser.close`，浏览器自己走正常关闭流程，
+ * 不是杀进程）。只用于「无头 → 可见」的切换：扫码登录需要一个看得见的窗口，而同一个
+ * profile 不能同时跑两个实例。等到端口真的不在了才返回。
+ */
+export async function closeBrowserAt(cdpUrl, { chromium: suppliedChromium = null, fetchImpl = null, waitMs = 6000 } = {}) {
+	const safeUrl = assertLoopbackCdpUrl(cdpUrl);
+	const port = Number(new URL(safeUrl).port || 80);
+	const chromium = suppliedChromium ?? await loadChromium();
+	try {
+		const browser = await chromium.connectOverCDP(safeUrl, { timeout: 5000 });
+		try {
+			const session = await browser.newBrowserCDPSession();
+			await session.send("Browser.close");
+		} catch { /* 有的实现关到一半就断连，下面靠探测兜底 */ }
+	} catch { /* 连不上就当它已经不在了 */ }
+	if (cached?.cdpUrl === safeUrl) cached = null;
+	autoLaunchAttemptedAt = 0;
+	const deadline = Date.now() + waitMs;
+	while (Date.now() < deadline) {
+		const probe = await probeCdp(port, { fetchImpl });
+		if (!probe.up) return { ok: true };
+		await new Promise((resolve) => setTimeout(resolve, 200));
+	}
+	return { ok: false, error: `浏览器在 ${Math.round(waitMs / 1000)} 秒内没有退出` };
+}
+
+/**
  * 连现有 Chrome；**连不上就先把 Chrome 拉起来再连一次**。
  *
  * `autoLaunch` 只在"用户没在操作、只是打开工作台看状态"时打开（`/boss/state`）。
  * 每次抓取/读取会话都去 spawn 一次浏览器是不对的。
+ *
+ * `visible: true` 是扫码登录专用：要求连上的必须是**有窗口**的实例。默认拉起是隐藏模式
+ * （见 auto-chrome 的 chromeMode），此时若端口后面是无头实例，就先让它退出、再以可见模式
+ * 重拉 —— 同一个 profile 起第二个可见实例只会被合并进无头的那个，窗口永远出不来。
  */
-export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chromium: suppliedChromium = null, requirePage = true, autoLaunch = false } = {}) {
+export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chromium: suppliedChromium = null, requirePage = true, autoLaunch = false, visible = false } = {}) {
 	const safeUrl = assertLoopbackCdpUrl(cdpUrl);
+	const chromium = suppliedChromium ?? await loadChromium();
+	if (visible) {
+		const state = await isHeadlessAt(Number(new URL(safeUrl).port || 80));
+		if (state.up && state.headless) {
+			const closed = await closeBrowserAt(safeUrl, { chromium });
+			if (!closed.ok) throw new BrowserSessionError("CDP_UNAVAILABLE", `需要一个可见的浏览器窗口来扫码，但现有的隐藏实例没能退出：${closed.error}`);
+		}
+		// 需要可见窗口 = 一定允许拉起（不然连不上就只剩报错）
+		autoLaunch = true;
+	}
 	if (cached?.browser?.isConnected?.()) {
 		const picked = await selectExistingBossSession(cached.browser.contexts());
 		if (picked !== null && (!requirePage || picked.page !== null)) return { ...picked, browser: cached.browser, cdpUrl: safeUrl };
 	}
-	const chromium = suppliedChromium ?? await loadChromium();
 	/** 自动拉起可能落在别的端口上（9222 被别的调试器占着），所以连接地址要跟着 boot 结果走。 */
 	let effectiveUrl = safeUrl;
 	let browser;
@@ -89,7 +144,7 @@ export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chr
 		let boot = null;
 		if (autoLaunch && autoLaunchAllowed()) {
 			autoLaunchAttemptedAt = Date.now();
-			boot = await ensureDebuggableChrome({ port: Number(new URL(safeUrl).port || 80) });
+			boot = await ensureDebuggableChrome({ port: Number(new URL(safeUrl).port || 80), mode: visible ? "normal" : null });
 			if (!boot.ok) throw new BrowserSessionError("CDP_UNAVAILABLE", describeBootFailure(boot));
 			effectiveUrl = `http://127.0.0.1:${boot.port}`;
 		}
@@ -100,7 +155,7 @@ export async function connectExistingBossBrowser({ cdpUrl = DEFAULT_CDP_URL, chr
 				`没有找到可复用的浏览器调试会话（${safeUrl}）。` +
 					`${autoLaunch ? `刚试过一次自动拉起，${waiting} 秒后会自动再试（或点「帮我启动浏览器」立刻重试）。` : "插件会在打开工作台时自己拉起一个带调试口的浏览器。"}` +
 					`一直不成功可以用 BOSS_CHROME_PATH 指定浏览器，或按 README「启动真实 Chrome 会话」那节手动启动。` +
-					`另外：**关掉那个窗口就等于断掉插件的通道** —— 抓取和读会话都需要它开着（不想看见它可以用 BOSS_CHROME_MODE=hidden）。`,
+					`另外：插件默认以隐藏模式（无窗口）拉起浏览器；若设了 BOSS_CHROME_MODE=normal，**关掉那个窗口就等于断掉插件的通道**，抓取和读会话都需要它开着。`,
 			);
 		}
 		try {
@@ -135,7 +190,7 @@ function describeBootFailure(boot) {
 	];
 	if (boot.path) lines.push(`用到的浏览器：${boot.path}${boot.mode === "hidden" ? "（隐藏模式）" : ""}`);
 	if (Array.isArray(boot.tried) && boot.tried.length > 0) lines.push(`找过这些位置：\n  ${boot.tried.join("\n  ")}`);
-	if (boot.mode === "hidden") lines.push("当前是隐藏模式（BOSS_CHROME_MODE=hidden）。如果它起不来，去掉这个环境变量回到可见窗口再试一次。");
+	if (boot.mode === "hidden") lines.push("当前是隐藏模式（默认）。如果它起不来，设 BOSS_CHROME_MODE=normal 回到可见窗口再试一次。");
 	lines.push("也可以在「设置 → 环境变量」里给 BOSS_CHROME_PATH 指定 chrome.exe 的绝对路径，或设 BOSS_AUTO_CHROME=0 关掉自动拉起。");
 	return lines.join("\n");
 }

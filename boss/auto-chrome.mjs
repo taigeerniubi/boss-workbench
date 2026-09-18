@@ -30,8 +30,8 @@
  *   - 拉起后**轮询等端口就绪**，有不等的上限。
  */
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { PROFILE_DIR, DATA_DIR, SITE, readJson, writeJson } from "./lib.mjs";
 
 /** 调试口。和 browser-channel 的默认值一致。 */
@@ -43,20 +43,82 @@ export const autoChromeEnabled = () => process.env.BOSS_AUTO_CHROME !== "0";
 /**
  * 拉起来的浏览器要不要显示窗口。
  *
- *   normal（默认）— 显示窗口。**这是已验证能用的那一种**：用户就是这么跑通的。
- *   hidden        — 加 `--headless=new`，不放窗口，但调试口和登录态照常工作。
+ *   hidden（默认）— 加 `--headless=new`，不放窗口；调试口、登录态、抓取都照常。
+ *   normal        — 显示窗口。扫码登录时需要它（见 browser-channel 的 visible 参数）。
  *
- * 为什么默认是 normal 而不是 hidden：headless 这条路我**没能验证成功** ——
- * 本机的受限 shell 里 Chrome 连正常多进程都起不来（crashpad 报 OpenProcess 拒绝访问、
- * mojo platform_channel 直接 FATAL），所以任何"headless 能不能开调试口"的实测都被污染了。
- * 把一个自己验不了的模式设成默认，万一它是坏的，用户就同时失去窗口和调试口。
- * 想用就显式设 `BOSS_CHROME_MODE=hidden`，坏了大不了去掉这个变量。
+ * 为什么默认改成 hidden（2026-09-18）：可见窗口的实际结果是用户顺手把它关掉，
+ * 下次抓取又拉一个 —— 「开一下又关掉」的循环。隐藏模式已在本机实测：
+ * Edge 153 `--headless=new` + 插件 profile，调试口即刻就绪，wt2 / __zp_stoken__ 都在，
+ * navigator.webdriver=false。早先「没能验证」是因为在受限 shell 里连正常 Chrome 都起不来。
+ *
+ * 想回到可见窗口：`BOSS_CHROME_MODE=normal`。
  */
-export const chromeMode = (env = process.env) => (String(env.BOSS_CHROME_MODE ?? "").toLowerCase() === "hidden" ? "hidden" : "normal");
-/** 隐藏模式要加的启动参数。 */
-export const headlessArgs = (mode) => (mode === "hidden" ? ["--headless=new"] : []);
+export const chromeMode = (env = process.env) => {
+	const raw = String(env.BOSS_CHROME_MODE ?? "").toLowerCase();
+	return raw === "normal" || raw === "visible" ? "normal" : "hidden";
+};
+
+/** 隐藏模式的窗口尺寸：默认 800×600 是无头浏览器的明显特征，对齐普通笔记本屏。 */
+export const HEADLESS_WINDOW = "1440,900";
+
+/**
+ * 隐藏模式要加的启动参数。
+ *
+ * `--headless=new` 下 UA 会写成 `HeadlessChrome/153.0.0.0`，窗口 800×600 ——
+ * 两个都是风控一眼能认的无头特征，所以这里一并抹掉：UA 换成同版本的正常写法，
+ * 窗口尺寸给成常见屏幕。userAgent 为 null 时不加 UA 参数（拿不到版本就别拼错的）。
+ */
+export const headlessArgs = (mode, userAgent = null) =>
+	mode === "hidden"
+		? ["--headless=new", `--window-size=${HEADLESS_WINDOW}`, ...(userAgent ? [`--user-agent=${userAgent}`] : [])]
+		: [];
+
+/**
+ * 从可执行文件旁边的版本目录（`…\Application\153.0.4234.32\`）读主版本号。
+ * Chrome / Edge 在 Windows 上都是这个布局；读不到返回 null。
+ */
+export function browserMajorVersion(exePath, { readdir = readdirSync } = {}) {
+	try {
+		const versions = readdir(dirname(exePath)).filter((n) => /^\d+\.\d+\.\d+\.\d+$/u.test(n));
+		if (versions.length === 0) return null;
+		versions.sort((a, b) => Number(b.split(".")[0]) - Number(a.split(".")[0]));
+		return Number(versions[0].split(".")[0]);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * 给隐藏模式拼一条**看起来像正常窗口**的 UA。
+ *
+ * 版本来源按序：exe 旁的版本目录 → profile 里的 `Last Version` 文件（上次跑过就有）
+ * → 上次成功拉起时记下的 UA → null（不加参数）。Edge 要带 `Edg/` 尾巴，Chrome 不带。
+ */
+export function headlessUserAgent({ name, path, platform = process.platform, profileDir = PROFILE_DIR, readdir = readdirSync, readFile = readFileSync } = {}) {
+	let major = path ? browserMajorVersion(path, { readdir }) : null;
+	if (major === null) {
+		try {
+			const last = String(readFile(join(profileDir, "Last Version"), "utf8")).trim();
+			if (/^\d+\./u.test(last)) major = Number(last.split(".")[0]);
+		} catch { /* 没跑过 */ }
+	}
+	if (major === null) {
+		const remembered = readJson(chromePathFile(), null)?.userAgent;
+		return typeof remembered === "string" && remembered !== "" ? remembered : null;
+	}
+	const os = platform === "win32" ? "Windows NT 10.0; Win64; x64" : platform === "darwin" ? "Macintosh; Intel Mac OS X 10_15_7" : "X11; Linux x86_64";
+	const edge = name === "Edge" ? ` Edg/${major}.0.0.0` : "";
+	return `Mozilla/5.0 (${os}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36${edge}`;
+}
+
+/** 把 UA 里的无头特征去掉（探测 /json/version 拿到的原始 UA 用它清洗后再记住）。 */
+export const sanitizeUserAgent = (ua) => String(ua ?? "").replace(/HeadlessChrome\//gu, "Chrome/");
 
 const chromePathFile = () => join(DATA_DIR, "chrome-path.json");
+/** 最近一次由插件拉起的记录：browser-channel 靠它判断「现在连着的是不是无头实例」。 */
+const launchRecordFile = () => join(DATA_DIR, "chrome-launch.json");
+export const readLaunchRecord = () => readJson(launchRecordFile(), null);
+export const writeLaunchRecord = (record) => { try { writeJson(launchRecordFile(), record); } catch { /* 记不住也不影响运行 */ } };
 
 /** 候选浏览器的定义。`running` 由调用方探测后注入，便于离线测试。 */
 export function browserCandidates({ env = process.env, exists = existsSync, platform = process.platform } = {}) {
@@ -163,9 +225,9 @@ export async function detectRunning({ platform = process.platform, env = process
 }
 
 /** 拉起浏览器时的参数。单独导出便于测试断言。 */
-export function buildLaunchArgs({ port = DEFAULT_PORT, userDataDir, url = `${SITE}/web/geek/jobs`, mode = "normal" } = {}) {
+export function buildLaunchArgs({ port = DEFAULT_PORT, userDataDir, url = `${SITE}/web/geek/jobs`, mode = "normal", userAgent = null } = {}) {
 	return [
-		...headlessArgs(mode),
+		...headlessArgs(mode, userAgent),
 		`--remote-debugging-port=${port}`,
 		"--remote-allow-origins=*",
 		`--user-data-dir=${userDataDir}`,
@@ -185,7 +247,7 @@ export async function probeCdp(port = DEFAULT_PORT, { fetchImpl = null, timeoutM
 		const res = await doFetch(`http://127.0.0.1:${port}/json/version`, controller === null ? {} : { signal: controller.signal });
 		if (!res.ok) return { up: false, error: `HTTP ${res.status}` };
 		const json = await res.json().catch(() => null);
-		return { up: true, browser: json?.Browser ?? null, webSocketDebuggerUrl: json?.webSocketDebuggerUrl ?? null };
+		return { up: true, browser: json?.Browser ?? null, userAgent: json?.["User-Agent"] ?? null, webSocketDebuggerUrl: json?.webSocketDebuggerUrl ?? null };
 	} catch (err) {
 		return { up: false, error: String(err?.name === "AbortError" ? "探测超时" : (err?.message ?? err)) };
 	} finally {
@@ -220,7 +282,9 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *   2. 其余候选（Chrome/Edge/Chromium 各试一遍）
  *   3. 换个端口再试（9222 可能被别的调试器占着）
  *
- * @param {{ port?: number, spawnImpl?: Function, fetchImpl?: Function, waitMs?: number, url?: string, userDataDir?: string, running?: object }} [options]
+ * `mode` 不传就按环境变量（默认 hidden）；扫码登录这类必须看见窗口的入口显式传 "normal"。
+ *
+ * @param {{ port?: number, spawnImpl?: Function, fetchImpl?: Function, waitMs?: number, url?: string, userDataDir?: string, running?: object, mode?: "hidden"|"normal" }} [options]
  */
 export async function ensureDebuggableChrome({
 	port = DEFAULT_PORT,
@@ -230,6 +294,7 @@ export async function ensureDebuggableChrome({
 	url = null,
 	userDataDir = PROFILE_DIR,
 	running = null,
+	mode: modeOverride = null,
 } = {}) {
 	const targetUrl = url ?? `${SITE}/web/geek/jobs`;
 	const before = await probeCdp(port, { fetchImpl });
@@ -250,24 +315,31 @@ export async function ensureDebuggableChrome({
 	// 先试"当前没在跑"的候选（更干净），再试其余的；都用插件自己的 profile。
 	const ordered = [...free, ...all.filter((c) => !free.includes(c))];
 	const failures = [];
-	const mode = chromeMode();
-	const remember = (candidate) => { try { writeJson(chromePathFile(), { path: candidate.path, name: candidate.name, at: new Date().toISOString() }); } catch { /* 记不住也没关系 */ } };
+	const mode = modeOverride ?? chromeMode();
+	// 隐藏模式下 UA / 窗口尺寸的无头特征要抹掉；真实 UA 从 /json/version 回读后清洗再记住，
+	// 下次版本目录读不到时还能兜底
+	const remember = (candidate, attempt, usedPort) => {
+		const userAgent = attempt.userAgent ? sanitizeUserAgent(attempt.userAgent) : (readJson(chromePathFile(), null)?.userAgent ?? null);
+		try { writeJson(chromePathFile(), { path: candidate.path, name: candidate.name, userAgent, at: new Date().toISOString() }); } catch { /* 记不住也没关系 */ }
+		writeLaunchRecord({ mode, port: usedPort, name: candidate.name, path: candidate.path, userDataDir, at: new Date().toISOString() });
+	};
+	const uaFor = (candidate) => (mode === "hidden" ? headlessUserAgent({ name: candidate.name, path: candidate.path, profileDir: userDataDir }) : null);
 
 	for (const candidate of ordered) {
-		const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port, userDataDir, url: targetUrl, waitMs, fetchImpl, mode });
+		const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port, userDataDir, url: targetUrl, waitMs, fetchImpl, mode, userAgent: uaFor(candidate) });
 		if (attempt.ok) {
-			remember(candidate);
-			return { ok: true, launched: true, port, mode, path: candidate.path, name: candidate.name, browser: attempt.browser, url: targetUrl, userDataDir, reusedProfile: false };
+			remember(candidate, attempt, port);
+			return { ok: true, launched: true, port, mode, path: candidate.path, name: candidate.name, browser: attempt.browser, userAgent: attempt.userAgent ?? null, url: targetUrl, userDataDir, reusedProfile: false };
 		}
 		failures.push(`${candidate.name}（端口 ${port}${mode === "hidden" ? "，隐藏模式" : ""}）：${attempt.error}`);
 	}
 	// 换个端口 —— 9222 可能被别的调试器占着
 	const altPort = port === DEFAULT_PORT ? DEFAULT_PORT + 1 : DEFAULT_PORT;
 	for (const candidate of ordered) {
-		const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port: altPort, userDataDir, url: targetUrl, waitMs, fetchImpl, mode });
+		const attempt = await tryLaunch({ spawnImpl, path: candidate.path, name: candidate.name, port: altPort, userDataDir, url: targetUrl, waitMs, fetchImpl, mode, userAgent: uaFor(candidate) });
 		if (attempt.ok) {
-			remember(candidate);
-			return { ok: true, launched: true, port: altPort, fallbackPort: true, mode, path: candidate.path, name: candidate.name, browser: attempt.browser, url: targetUrl, userDataDir, reusedProfile: false };
+			remember(candidate, attempt, altPort);
+			return { ok: true, launched: true, port: altPort, fallbackPort: true, mode, path: candidate.path, name: candidate.name, browser: attempt.browser, userAgent: attempt.userAgent ?? null, url: targetUrl, userDataDir, reusedProfile: false };
 		}
 		failures.push(`${candidate.name}（端口 ${altPort}${mode === "hidden" ? "，隐藏模式" : ""}）：${attempt.error}`);
 	}
@@ -284,16 +356,17 @@ export async function ensureDebuggableChrome({
 			`用的 profile 是 ${userDataDir}（插件自己的目录，不是浏览器默认 profile）。\n` +
 			"可选的下一步：\n" +
 			"  · 确认那个浏览器的窗口确实弹出来了（任务栏可能被最小化/藏到后台）；\n" +
+			(mode === "hidden" ? "  · 隐藏模式起不来可以设 BOSS_CHROME_MODE=normal 回到可见窗口再试；\n" : "") +
 			"  · 或用 BOSS_CHROME_PATH 指定另一个浏览器可执行文件后重试；\n" +
 			"  · 或按 README「启动真实 Chrome 会话」那节手动带 --remote-debugging-port=9222 启动。",
 	};
 }
 
 /** 试一次：拉起 + 等端口。port / userDataDir / mode 都是参数，便于多轮重试。 */
-async function tryLaunch({ spawnImpl, path, name, port, userDataDir, url, waitMs, fetchImpl, mode = "normal" }) {
+async function tryLaunch({ spawnImpl, path, name, port, userDataDir, url, waitMs, fetchImpl, mode = "normal", userAgent = null }) {
 	let child;
 	try {
-		child = spawnImpl(path, buildLaunchArgs({ port, userDataDir, url, mode }), { detached: true, stdio: "ignore", windowsHide: false });
+		child = spawnImpl(path, buildLaunchArgs({ port, userDataDir, url, mode, userAgent }), { detached: true, stdio: "ignore", windowsHide: mode === "hidden" });
 		child?.unref?.();
 	} catch (err) {
 		return { ok: false, error: `启动 ${name} 失败：${String(err?.message ?? err)}` };
@@ -302,7 +375,7 @@ async function tryLaunch({ spawnImpl, path, name, port, userDataDir, url, waitMs
 	while (Date.now() < deadline) {
 		await wait(300);
 		const now = await probeCdp(port, { fetchImpl });
-		if (now.up) return { ok: true, browser: now.browser };
+		if (now.up) return { ok: true, browser: now.browser, userAgent: now.userAgent ?? null };
 	}
 	return { ok: false, error: `${name} 起来了但 ${Math.round((Number(waitMs) || 0) / 1000)} 秒内 ${port} 没就绪` };
 }

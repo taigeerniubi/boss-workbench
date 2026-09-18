@@ -144,6 +144,10 @@ async function verifyOnce() {
  *
  * `autoLaunch` 只在"用户刚进工作台 / 点了重新连接"这类入口为 true；
  * 抓取和读会话不重复触发（见 browser-channel 里那个每进程只试一次的闸门）。
+ *
+ * 窗口可见性：先按默认（隐藏）连；发现没登录、需要扫码时，再换成 `visible: true`
+ * 的可见实例。登录完之后那个可见窗口留着不动（用户可能还在看）；关掉后下次抓取会
+ * 重新拉一个隐藏实例，登录态在 profile 里，不用再扫。
  */
 export async function startLogin({ force = false, autoLaunch = true } = {}) {
 	if (!force && ["waiting-browser", "verifying", "logged-in"].includes(flow.phase) && Date.now() - flow.startedAt < EXPIRE_MS) {
@@ -159,6 +163,17 @@ export async function startLogin({ force = false, autoLaunch = true } = {}) {
 	}
 	flow.context = linked.context;
 	flow.page = linked.page;
+	if (linked.loggedIn) return { ok: true, resumed: false, ...(await verifyOnce()) };
+	// 还没登录 → 要扫码 → 必须有看得见的窗口。默认拉起是隐藏模式，这里换成可见实例
+	// （无头的先退出再重拉，同一 profile 不能并存两个实例）。已登录的路径用不到这一步。
+	try {
+		linked = await connectExistingBossBrowser({ requirePage: false, autoLaunch: true, visible: true });
+		flow.context = linked.context;
+		flow.page = linked.page;
+	} catch (err) {
+		const code = err instanceof BrowserSessionError ? err.code : "CDP_ERROR";
+		return { ok: false, ...setPhase("browser-unavailable", { error: String(err?.message ?? err), detail: code }) };
+	}
 	if (linked.loggedIn) return { ok: true, resumed: false, ...(await verifyOnce()) };
 	try {
 		if (flow.page === null || flow.page.isClosed?.()) {
