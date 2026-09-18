@@ -346,17 +346,42 @@ export const clearSession = () => writeJson(sessionPath(), null);
 
 /** HTTP 层：Node 自己发请求，不需要浏览器。请求头照参考项目实测可用的那一套。 */
 export const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+/** 把 `k=v; k=v` 解析成 Map。同名的取**最后**一个（靠后的通常是新写的）。 */
+export function parseCookieJar(cookie) {
+	const jar = new Map();
+	for (const pair of String(cookie ?? "").split("; ")) {
+		if (!pair.includes("=")) continue;
+		const i = pair.indexOf("=");
+		jar.set(pair.slice(0, i).trim(), pair.slice(i + 1));
+	}
+	return jar;
+}
+
+/**
+ * 一次 wapi 请求。
+ *
+ * ⚠️ **`zp_token` 头必须跟着 cookie 里的 `bst` 走，不能另存一份。** 这是踩过的坑：
+ * security-check 那一步会把 `bst` **换成一个新值**，而我们把 dispatcher 给的那个旧值
+ * 存进了 `session.bst` 并且一直拿它当 `zp_token` 头发。结果就是
+ * **cookie 里的 bst 和 header 里的 zp_token 不是同一个值**，Boss 判定
+ * `code 37 您的环境存在异常` —— 而同一时刻 `getUserInfo` 却回 code 0，
+ * 于是表现成"明明登录着，就是搜不了岗位"，非常难查。
+ *
+ * 现在统一从这里取：有 cookie 就用 cookie 里的（唯一真相），没有才退回 session.bst。
+ */
 export async function httpApi(path, params = {}, session, { method = "GET", referer = `${SITE}/web/user/?ka=header-login` } = {}) {
 	if (session === null || session === undefined) throw new Error("httpApi: 没有会话，先跑 node boss/login.mjs");
 	const url = new URL(path.startsWith("http") ? path : SITE + path);
 	for (const [k, v] of Object.entries(params)) if (v !== null && v !== undefined) url.searchParams.set(k, String(v));
 	if (!url.searchParams.has("_")) url.searchParams.set("_", String(Date.now()));
+	const zpToken = parseCookieJar(session.cookie).get("bst") ?? session.bst ?? "";
 	const res = await fetch(url, {
 		method,
 		redirect: "manual",
 		headers: {
 			Cookie: session.cookie,
-			zp_token: session.bst ?? "",
+			zp_token: zpToken,
 			"User-Agent": UA,
 			Referer: referer,
 			Origin: SITE,
@@ -368,21 +393,35 @@ export async function httpApi(path, params = {}, session, { method = "GET", refe
 	try {
 		json = JSON.parse(text);
 	} catch { /* 有些接口回 HTML / 图片 */ }
-	return { status: res.status, json, text, headers: res.headers, url: url.toString() };
+	return { status: res.status, json, text, headers: res.headers, url: url.toString(), zpToken };
 }
 
 /** 登录态失效（code 7）和风控（code 35）要分开处理：前者重新登录，后者必须停手。 */
 export const isLoggedOut = (json) => json !== null && typeof json === "object" && (json.code === 7 || /登录状态已失效|请先登录/u.test(String(json.message ?? "")));
 
 /**
- * 当前登录态。`header.json` 里 `isLogin` 是 Boss 自己给的权威答案，
- * 而且它不需要登录就能调 —— 正好用来判断"要不要重新扫码"。
+ * 当前登录态。
+ *
+ * ⚠️ **别用 `header.json` 的 `isLogin`。** 这是踩过的坑：
+ * 实测同一时刻 `getUserInfo` 回 `code 0`（真登录态），而 `header.json` 的
+ * `isLogin` 仍然是 `false` —— 它反映的是"这个网页文档登录了没有"，
+ * 不是"这套 cookie 能不能用"。信它的后果就是：**明明登录着，工作台每次打开
+ * 都弹二维码**（闸门以为没登录 → 去取码 → 又因为宿主流程停在 logged-in 而显示
+ * "登录成功"，两句话自相矛盾）。
+ *
+ * 现在的判据是 `getUserInfo` 的 code：0 = 登录态，7 = 失效。
  */
 export async function loginStateHttp(session) {
-	const r = await httpApi("/wapi/zpgeek/common/data/header.json", {}, session);
-	const html = typeof r.json?.zpData === "string" ? r.json.zpData : "";
-	const m = /isLogin:\s*(true|false)/u.exec(html);
-	return { flagged: isFlagged(r.json), loggedIn: m?.[1] === "true", message: r.json?.message ?? r.text?.slice(0, 80) };
+	const r = await httpApi("/wapi/zpuser/wap/getUserInfo.json", {}, session, { referer: `${SITE}/web/geek/chat` });
+	const code = r.json?.code ?? null;
+	if (code === 0) return { flagged: false, loggedIn: true, code, message: r.json?.message ?? "Success" };
+	// code 7 = 登录状态已失效；其余（35 / 37 / 其它）照原样带出去，让上层决定怎么处理
+	return {
+		flagged: isFlagged(r.json),
+		loggedIn: false,
+		code,
+		message: r.json?.message ?? r.text?.slice(0, 80),
+	};
 }
 
 /**
@@ -393,7 +432,7 @@ export async function loginStateHttp(session) {
  * 结果就是工作台上显示"登录成功"，可下一次请求 Boss 回 code 7（登录状态已失效）。
  * 现在这里必须拿到 getUserInfo 的 code 0 才算数，否则如实回报。
  */
-export async function completeSecurityCheck(initialCookie, { log = () => {}, waitMs = 3000, dropStoken = false } = {}) {
+export async function completeSecurityCheck(initialCookie, { log = () => {}, waitMs = 1500, dropStoken = false, onProgress = null } = {}) {
 	const { ctx, page } = await openSession({ headless: true });
 	try {
 		const cookies = initialCookie
@@ -421,35 +460,62 @@ export async function completeSecurityCheck(initialCookie, { log = () => {}, wai
 			log("  已清掉旧的 __zp_stoken__（要重新签一个）");
 		}
 		await page.goto(SECURITY_CHECK_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
-		try {
-			await page.waitForLoadState("networkidle", { timeout: 30000 });
-			log("  网络已空闲");
-		} catch {
-			log("  等网络空闲超时（继续）");
+
+		/**
+		 * 等 __zp_stoken__ 出现，**一出现就走**。
+		 *
+		 * 原来是 `waitForLoadState("networkidle")` + 死等 3 秒。实测两个都糟：
+		 * 挂着代理时 security-check 页永远"不空闲"（有长连接/心跳），于是每次都白等
+		 * 满 30 秒超时，再白等 3 秒 —— 这就是"扫码以后半天没反应"的全部原因。
+		 * 实际 stoken 通常 1~2 秒内就写进去了，所以改成 250ms 轮询、见到即返回。
+		 */
+		let stoken = null;
+		let waited = 0;
+		const POLL_MS = 250;
+		const DEADLINE = 20000;
+		while (waited < DEADLINE) {
+			const now = await ctx.cookies(SITE);
+			stoken = now.find((c) => c.name === "__zp_stoken__") ?? null;
+			if (stoken !== null && stoken.value.length > 20) break;
+			await page.waitForTimeout(POLL_MS);
+			waited += POLL_MS;
+			if (waited % 2000 === 0) onProgress?.(`等 __zp_stoken__… 已 ${Math.round(waited / 1000)}s`);
 		}
-		await page.waitForTimeout(waitMs);
+		// 兜底再等一小会儿：有些情况下 stoken 是页面加载完之后才写的
+		if (stoken === null || stoken.value.length <= 20) {
+			if (waitMs > 0) await page.waitForTimeout(waitMs);
+		}
+		log(waited >= DEADLINE ? `  等 stoken 到顶（${DEADLINE / 1000}s）` : `  等了 ${(waited / 1000).toFixed(1)}s`);
+
 		// 主路径用 context.cookies()：它跨文档都能读，而且能看到 document.cookie 看不到的 httpOnly。
 		// document.cookie 只作兜底 —— 有些文档（错误页 / 跨源 / opaque origin）会直接抛 SecurityError。
-		const all = await ctx.cookies();
+		// 传 SITE 让 Playwright 只回"对 zhipin.com 生效"的那批，能少带一堆别的域的 cookie。
+		const all = await ctx.cookies(SITE);
 		let jsCookies = "";
 		try {
 			jsCookies = await page.evaluate(() => document.cookie);
 		} catch {
 			log("  document.cookie 读不到（该文档不允许），改用 context.cookies()");
 		}
-		const stoken = all.find((c) => c.name === "__zp_stoken__");
+		stoken = all.find((c) => c.name === "__zp_stoken__") ?? null;
 		log(`  落在: ${page.url().slice(0, 110)}`);
 		log(`  cookie 共 ${all.length} 个${all.length > 0 ? "：" + all.map((c) => c.name).join(",") : ""}`);
-		log(stoken === undefined ? "  ⚠️ 没拿到 __zp_stoken__" : `  ✓ 拿到 __zp_stoken__（${stoken.value.length} 字节）`);
-		const merged = all.length > 0 ? all.map((c) => `${c.name}=${c.value}`).join("; ") : jsCookies;
+		log(stoken === undefined || stoken === null ? "  ⚠️ 没拿到 __zp_stoken__" : `  ✓ 拿到 __zp_stoken__（${stoken.value.length} 字节）`);
+
+		// ── 拼 Cookie 头：**必须去重** ────────────────────────────────────
+		// 同一个名字在 `.zhipin.com` 和 `www.zhipin.com` 下会各存一份，ctx.cookies() 两份都回。
+		// 原样拼出来的头里就会有重复名字，服务端取哪一份是不确定的 —— 实测拼出过
+		// `HMACCOUNT_BFESS=…; …; HMACCOUNT_BFESS=…` 这种，跟着就是 code 37「环境存在异常」。
+		const merged = all.length > 0 ? effectiveCookieHeader(all).header : jsCookies;
 
 		// ── 真凭实据：问一次 /wapi/zpuser/wap/getUserInfo.json ──────────────
 		// ctx.request 和浏览器共用同一个 cookie jar，所以问的就是"浏览器现在这个身份"。
+		onProgress?.("验证登录态…");
 		const verify = { ok: false, code: null, message: null, user: null };
 		try {
 			const r = await ctx.request.get(`${SITE}/wapi/zpuser/wap/getUserInfo.json`, {
 				headers: { referer: `${SITE}/web/geek/job-recommend`, accept: "application/json, text/plain, */*" },
-				timeout: 20000,
+				timeout: 15000,
 			});
 			const j = await r.json().catch(() => null);
 			verify.code = j?.code ?? null;
@@ -462,10 +528,48 @@ export async function completeSecurityCheck(initialCookie, { log = () => {}, wai
 		}
 		log(verify.ok ? `  ✓ 登录态已验证（getUserInfo code 0${verify.user === null ? "" : "，账号 " + String(verify.user)}）` : `  ✗ 登录态验证没过：code=${verify.code} ${verify.message ?? ""}`);
 
-		return { stoken: stoken?.value ?? null, cookie: merged, url: page.url(), verify };
+		return { stoken: stoken?.value ?? null, cookie: merged, url: page.url(), verify, deduped: effectiveCookieHeader(all).dropped };
 	} finally {
 		await ctx.close();
 	}
+}
+
+/**
+ * 把 Playwright 给的 cookie 列表拼成一条能直接放进 `Cookie:` 头的字符串，**按名字去重**。
+ *
+ * 同一个名字可能有多份（不同 domain / path）。选哪一份的规则：
+ *   1. 域更"宽"的优先 —— `.zhipin.com` 比 `www.zhipin.com` 更可能挂着登录凭证；
+ *   2. 路径是 `/` 的优先；
+ *   3. 还并列就取**后面**那个（`ctx.cookies()` 里靠后的通常是刚写进去的）。
+ *
+ * 返回被丢掉的那些名字，方便在日志里说清楚"我替你做主了"。
+ */
+export function effectiveCookieHeader(cookies) {
+	const rank = (c) => {
+		let r = 0;
+		if (c.domain === ".zhipin.com" || c.domain === "zhipin.com") r += 4;
+		else if (typeof c.domain === "string" && c.domain.startsWith(".")) r += 2;
+		if (c.path === "/") r += 1;
+		return r;
+	};
+	const best = new Map();
+	const dropped = [];
+	for (const c of cookies) {
+		if (typeof c?.name !== "string" || c.name === "") continue;
+		const prev = best.get(c.name);
+		if (prev === undefined) {
+			best.set(c.name, c);
+			continue;
+		}
+		// >= 而不是 >：并列时后面那个赢
+		if (rank(c) >= rank(prev)) {
+			dropped.push(`${c.name}（${prev.domain ?? "?"}${prev.path ?? ""} 让位给 ${c.domain ?? "?"}${c.path ?? ""}）`);
+			best.set(c.name, c);
+		} else {
+			dropped.push(`${c.name}（${c.domain ?? "?"}${c.path ?? ""} 被丢掉，保留 ${prev.domain ?? "?"}${prev.path ?? ""}）`);
+		}
+	}
+	return { header: [...best.values()].map((c) => `${c.name}=${c.value}`).join("; "), dropped, count: best.size };
 }
 
 /** 筛选枚举的代码表（取自参考项目，与 filter/conditions.json 一致）。 */

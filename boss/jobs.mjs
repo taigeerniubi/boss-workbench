@@ -116,6 +116,36 @@ export async function runScrape(opts = {}) {
 		if (p < pages) await new Promise((res) => setTimeout(res, minDelay + Math.random() * (maxDelay - minDelay)));
 	}
 
+	// ── 撞上签名挑战（code 37）就换浏览器来发这个请求 ────────────────────────
+	// Code 37 的响应体是 `{seed, name, ts}`：Boss 要的不是"你登录了没有"，
+	// 而是"这个请求是不是它自己的页面发的"。那套算法在 Boss 的 JS bundle 里而且会变，
+	// 硬逆向等于跟一个每天变的目标赛跑。换个思路：**让它的页面去发**，我们只截 JSON。
+	// 代价是要开一次无头浏览器（几秒），收益是不用维护签名算法。
+	const usedBrowser = stopped?.kind === "abnormal-env" && mode === "search" && opts.browserFallback !== false;
+	if (usedBrowser) {
+		log("Node 直连被签名挑战挡了（code 37）→ 改用浏览器发这个搜索请求");
+		try {
+			const { browserSearch } = await import("./browser-search.mjs");
+			const br = await browserSearch({ city, query, page: 1, log });
+			rawPages.push({ browser: true, ok: br.ok, code: br.code, message: br.message, onPage: br.onPage, attempts: br.attempts });
+			if (br.ok) {
+				collected.length = 0; // 以浏览器这批为准
+				for (const item of br.jobs) collected.push(normalizeJob(item, profile));
+				stopped = null;
+				log(`浏览器抓到 ${br.jobs.length} 条`);
+			} else {
+				stopped = {
+					kind: "browser-blocked",
+					message: `浏览器也没发出去：code=${br.code ?? "?"} ${br.message ?? ""}`
+						+ (br.onPage?.includes("verify") ? ` —— 页面被弹到验证墙了，先跑 node boss/verify-browser.mjs 过一次真人验证` : ""),
+					onPage: br.onPage ?? null,
+				};
+			}
+		} catch (err) {
+			stopped = { kind: "browser-error", message: `浏览器兜底失败：${String(err?.message ?? err).split("\n")[0]}` };
+		}
+	}
+
 	// ── 合并进 data/jobs.json（按 id 去重）──────────────────────────────────
 	let jobs = [];
 	let added = 0;
@@ -157,6 +187,7 @@ export async function runScrape(opts = {}) {
 		total: jobs.length,
 		jobs,
 		stopped,
+		usedBrowser,
 		nearKm: maxKm === null ? null : filterJobs(jobs, { maxKm }).length,
 	};
 }

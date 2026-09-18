@@ -946,6 +946,131 @@ export const PROFILE_DIR= join(HOME_DIR, "browser-profile"); // 浏览器 persis
 处理：**改写那一个提交**（仓库是全新的、只有一个提交、没有协作者，`--force-with-lease` 是安全的），
 并在改写前把示例值换成中性值。这样历史里也不留。
 
+## 14. 「每次打开都弹二维码」+「扫码后半天没反应」+「还是 code 37」
+
+用户报的三件事，**是四个互相独立的 bug**。前三个都不在"风控"上，是纯实现错误。
+
+### 14.1 弹二维码的根因：`header.json` 的 `isLogin` 在骗人
+
+闸门的判断是"`/boss/login/state` 说不登录 → 弹码"。而 `loginStateHttp()` 读的是
+`header.json` 里那个 `isLogin` 字段。实测把它和 `getUserInfo` 放在同一时刻比：
+
+```
+getUserInfo  → code 0（真·登录态）
+header.json  → isLogin: false        ← 同一个 cookie、同一秒
+```
+
+`header.json` 的 `isLogin` 表达的是"**这个网页文档**登录了没有"，不是"这套 cookie 能不能用"。
+信它的后果就是**明明登录着，每次进工作台都弹码**。
+
+修法：`loginStateHttp()` 改判 `getUserInfo` 的 code（0 = 登录态，7 = 失效）。
+`header.json` 那条路整个删掉。
+
+### 14.2 二维码旁边写着"登录成功"：宿主流程与真实状态打架
+
+两句话同时出现，是因为两条路径各说各话：
+
+- 闸门**为什么打开**：`/boss/login/state` 说没登录；
+- 打开之后调 `/boss/login/start`，而宿主那个模块级的 `flow` **还停在 `logged-in`**
+  （上一次登录留下的），于是 `startLogin` 直接 `resumed: true` 把它原样返回 ——
+  界面就画出"登录成功"，二维码位是空的。
+
+修法两层：
+1. `startLogin` 在"要复用 `logged-in` 流程"时**当场验一次**，验不过就把流程作废、重新发码；
+2. 客户端拿到 `phase: "logged-in"` 时再问一次 `/boss/login/state?force=1`，不一致就
+   `?force=1` 强发新码。**闸门永远不会显示一个没验证过的"登录成功"。**
+
+### 14.3 "扫码后半天没反应"：在等一个永远不会来的事件
+
+`completeSecurityCheck` 里原来是：
+
+```js
+await page.waitForLoadState("networkidle", { timeout: 30000 });  // 挂着代理时永远不空闲
+await page.waitForTimeout(waitMs);                                // 再死等 3 秒
+```
+
+security-check 页有长连接/心跳，**永远到不了 networkidle**，所以每次都白等满 30 秒超时，
+再白等 3 秒。而实际的 `__zp_stoken__` 通常 1~2 秒就写好了。
+
+修法：改成 **250ms 轮询 cookie，见到 stoken 立刻返回**（上限 20s）。
+并把进度通过 `onProgress` → `flow.detail` → `/boss/login/status` → 闸门下面那行小字透出来，
+用户能看见"等 __zp_stoken__… 已 3s"而不是干瞪一个转圈。
+
+### 14.4 还有一个真 bug：`zp_token` 头和 `bst` cookie 不是同一个值
+
+这条是查 37 的时候顺手挖出来的，**它本身就是错的**：
+
+```
+session.bst（放进 zp_token 头的） = V2Rtkl…LSu26zLSwyo~|…h0cLSKy7DrSwyo~
+cookie 里的 bst                   = V2Rtkl…h0cLSKy7DrSwyo~|…h0cLSKy7DrQxCo~
+                                    ^^^^^^^^^^^^^^^^^^^^^ 完全不是一回事
+```
+
+`bst` 是个**会轮换**的令牌对，security-check 那一步会把它换成新值，
+而我们一直拿 dispatcher 给的旧值当请求头。cookie 和 header 对不上，
+Boss 就回 `37 环境存在异常`。
+
+修法：`httpApi` 一律 `parseCookieJar(session.cookie).get("bst")` 取，**以 cookie 为唯一真相**；
+登录/修会话落盘时也存 security-check 之后的新值。
+
+顺带修了同一处的另一个问题：注入的 cookie 在 `.zhipin.com` 和 `www.zhipin.com` 下各存一份，
+`ctx.cookies()` 两份都回，拼出来的 `Cookie` 头里有重复名字
+（实测出现过 `HMACCOUNT_BFESS=…; …; HMACCOUNT_BFESS=…`）。
+现在 `effectiveCookieHeader()` 按名字去重，域更宽 / 路径 `/` 的优先，并在日志里说明丢了哪个。
+
+### 14.5 但 37 还在：这是**签名挑战**，不是登录问题
+
+上面四条都修完（`getUserInfo` 回 `code 0`，确认登录态是真的），两个岗位接口**仍然**回：
+
+```json
+{"code":37,"message":"您的环境存在异常.","zpData":{"seed":"…","name":"76215708","ts":1789641267797}}
+```
+
+`seed` / `name` / `ts` 三个字段说明这是**服务端在等一个算出来的东西** ——
+Boss 要的不是"你登录了没有"，而是"这个请求是不是它自己的页面发的"。
+那套算法在 Boss 的 JS bundle 里，而且会变。
+
+**没有去逆向它**，理由：那是跟一个每天变的目标赛跑，赢了也要天天维护。
+换了个思路 —— 让 Boss 自己的页面去发这个请求：
+
+| 做法 | 脚本 | 状态 |
+|---|---|---|
+| 截页面自己发的 joblist | `boss/browser-search.mjs` | ✅ 能用，但先要过验证墙 |
+| 撞 37 时自动改走浏览器 | `runScrape` 的 `browserFallback` | ✅ 已接 |
+
+### 14.6 现在真正的拦路虎：`verify.html`
+
+用无头浏览器去抓岗位，落点是
+
+```
+https://www.zhipin.com/web/passport/zp/verify.html?callbackUrl=…
+```
+
+也就是 DESIGN §5 记过的那道**匿名墙**：指纹伪装过不去，是真人验证（滑块/短信）。
+`getUserInfo` 能通、页面被拦，说明 Boss **对"接口"和"网页"是两套信任**。
+
+所以留给用户一步人工动作：
+
+```bash
+npm run verify              # 开一个**有头**窗口，过掉验证；过了之后 profile 就被信任了
+npm run verify -- --direct  # 如果梯子的出口节点被 Boss 盯上，直连再试一次
+```
+
+过完之后同 profile 的浏览器请求就通了，`browser-search.mjs` / `runScrape` 的浏览器兜底
+都能用。脚本会当场用一次真搜索验收。
+
+### 14.7 验证状态
+
+| 项 | 状态 |
+|---|---|
+| `loginStateHttp` 改判 `getUserInfo` | ✅ 实测 `loggedIn: true`（之前是 false） |
+| `zp_token` 跟随 cookie 的 `bst` | ✅ 单元层面验证；对 37 无影响（见 14.5） |
+| cookie 去重 | ✅ `effectiveCookieHeader()` 用构造数据验过 |
+| 登录提速（轮询 stoken） | ✅ 代码就位，`flow.detail` 已透到闸门 |
+| 闸门不再假报"登录成功" | ✅ 宿主 + 客户端两层都加了验证 |
+| `smoke.mjs` / `parse.test.mjs` | ✅ 全部通过 |
+| **真抓到岗位** | ❌ 仍未 —— 等 `npm run verify` 过墙 |
+
 
 
 

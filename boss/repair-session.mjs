@@ -11,7 +11,7 @@
  *
  *   node boss/repair-session.mjs
  */
-import { completeSecurityCheck, loadSession, loginStateHttp, saveSession, systemProxy } from "./lib.mjs";
+import { completeSecurityCheck, loadSession, loginStateHttp, parseCookieJar, saveSession, systemProxy } from "./lib.mjs";
 
 const session = loadSession();
 if (session === null) {
@@ -44,13 +44,17 @@ try {
 }
 
 console.log("\n③ 落盘");
+const finalCookie = sec.stoken === null ? session.cookie : sec.cookie;
+// bst 会被 security-check 换成新值 —— 存旧的会让 cookie 与 zp_token 头对不上（→ code 37）
+const finalBst = parseCookieJar(finalCookie).get("bst") ?? session.bst;
+if (finalBst !== session.bst) console.log(`   bst 被安全验证换过了（${String(session.bst).slice(0, 12)}… → ${finalBst.slice(0, 12)}…），存新的`);
 saveSession({
-	cookie: sec.stoken === null ? session.cookie : sec.cookie,
-	bst: session.bst,
+	cookie: finalCookie,
+	bst: finalBst,
 	stoken: sec.stoken === null ? null : "present",
 	step: sec.verify?.ok === true ? "logged-in" : "unverified",
 });
-console.log(`   data/session.json 已更新（cookie ${sec.cookie.length} 字节，stoken ${sec.stoken === null ? "无" : sec.stoken.length + " 字节"}）`);
+console.log(`   data/session.json 已更新（cookie ${finalCookie.length} 字节，stoken ${sec.stoken === null ? "无" : sec.stoken.length + " 字节"}）`);
 
 if (sec.verify?.ok === true) {
 	// user 是运行时读出来的，写进日志没问题（源码里不出现任何账号字面量）

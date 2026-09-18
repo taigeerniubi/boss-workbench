@@ -14,13 +14,13 @@
  * phase: idle → waiting-scan → waiting-confirm → finalizing → logged-in
  *        另有 flagged（code 35）/ expired / failed 三种终止态。
  */
-import { completeSecurityCheck, generateFp, httpApi, isFlagged, loginStateHttp, saveSession } from "./lib.mjs";
+import { completeSecurityCheck, generateFp, httpApi, isFlagged, loginStateHttp, parseCookieJar, saveSession } from "./lib.mjs";
 
 const EXPIRE_MS = 3 * 60 * 1000;
 const FINALIZE_TIMEOUT_MS = 60 * 1000;
 
 /** 当前这一次登录尝试。同一时间只允许一个 —— 二维码是单例的。 */
-let flow = { phase: "idle", qrId: null, cookie: "", bst: "", startedAt: 0, error: null, finalizing: false };
+let flow = { phase: "idle", qrId: null, cookie: "", bst: "", startedAt: 0, error: null, finalizing: false, detail: null };
 
 /** 登录态检查的短缓存，避免页面每次挂载都打一次 Boss。 */
 let stateCache = { at: 0, value: null };
@@ -35,6 +35,9 @@ const snapshot = () => ({
 	qrId: flow.qrId,
 	startedAt: flow.startedAt === 0 ? null : new Date(flow.startedAt).toISOString(),
 	error: flow.error,
+	// 细粒度进度（"等 __zp_stoken__… 已 3s" 这种）。安全验证那一步要开浏览器，
+	// 只给一个转圈图标的话用户不知道是在跑还是卡死了 —— 这就是"半天没反应"的观感来源。
+	detail: flow.detail,
 });
 
 /** 把响应里的 Set-Cookie 合并进这次流程的 cookie 串。 */
@@ -66,11 +69,28 @@ function absorb(res) {
 }
 
 /** ① + ②：开一次登录会话并取二维码（返回可直接塞进 <img src> 的 data URL）。 */
+const log = (line) => console.log(line);
+const setDetail = (text) => {
+	flow.detail = text;
+};
+
+/**
+ * 开一次登录会话并取二维码。
+ *
+ * 注意最后那个分支：**"宿主流程停在 logged-in"不等于"真的登录着"**。
+ * 之前直接把它当成可复用的状态返回，于是闸门拿到 `phase:"logged-in"`，
+ * 界面上写着"登录成功"、旁边却是个空二维码位 —— 而实际的登录态可能是失效的。
+ * 现在这种情况会**当场验一次**：验证不过就把流程作废、重新发码。
+ */
 export async function startLogin({ force = false } = {}) {
-	if (!force && flow.phase !== "idle" && flow.phase !== "expired" && flow.phase !== "failed" && Date.now() - flow.startedAt < EXPIRE_MS) {
-		return { ok: true, resumed: true, ...snapshot() };
+	if (!force && flow.phase !== "idle" && flow.phase !== "expired" && flow.phase !== "failed" && flow.phase !== "uncertain" && Date.now() - flow.startedAt < EXPIRE_MS) {
+		if (flow.phase !== "logged-in") return { ok: true, resumed: true, ...snapshot() };
+		const st = await loginState({ force: true });
+		if (st.loggedIn === true) return { ok: true, resumed: true, ...snapshot() };
+		// 流程说登录成功、真实状态说没有 → 这个流程不作数，往下走重新发码
+		console.log(`[login] 流程停在 logged-in 但登录态验证不过（code=${st.code ?? "?"} ${st.message ?? ""}）→ 重新发码`);
 	}
-	flow = { phase: "idle", qrId: null, cookie: "", bst: "", startedAt: Date.now(), error: null, finalizing: false };
+	flow = { phase: "idle", qrId: null, cookie: "", bst: "", startedAt: Date.now(), error: null, finalizing: false, detail: "正在向 Boss 要二维码…" };
 
 	const rand = await httpApi("/wapi/zppassport/captcha/randkey", {}, { cookie: "", bst: "" }, { method: "POST" });
 	if (isFlagged(rand.json)) return { ok: false, ...setPhase("flagged", { error: `风控 code 35：${rand.json?.message ?? ""}` }) };
@@ -104,10 +124,16 @@ async function finalize() {
 			return setPhase("failed", { error: "dispatcher 没下发 cookie —— 大概率 fp 的两个常量失效了（见 DESIGN §9.2）" });
 		}
 		flow.bst = granted.bst ?? "";
+		setDetail("已换到登录凭证，正在过安全验证（要开一次无头浏览器）…");
 
-		const sec = await completeSecurityCheck(flow.cookie, { log: (line) => console.log(line) });
+		const sec = await completeSecurityCheck(flow.cookie, { log, onProgress: setDetail });
 		const finalCookie = sec.stoken === null ? flow.cookie : sec.cookie;
-		saveSession({ cookie: finalCookie, bst: flow.bst, stoken: sec.stoken === null ? null : "present", step: sec.verify?.ok === true ? "logged-in" : "unverified" });
+		// bst 会被 security-check 换成新值 —— 必须把**最终**那个存下来。
+		// 存旧的会让后面每个请求的 cookie 和 zp_token 头对不上，Boss 回 code 37。
+		const finalBst = parseCookieJar(finalCookie).get("bst") ?? flow.bst;
+		saveSession({ cookie: finalCookie, bst: finalBst, stoken: sec.stoken === null ? null : "present", step: sec.verify?.ok === true ? "logged-in" : "unverified" });
+		if (finalBst !== flow.bst) console.log(`[login] bst 被安全验证换过了（${flow.bst.slice(0, 12)}… → ${finalBst.slice(0, 12)}…），已存新的`);
+		flow.bst = finalBst;
 		// 只有 Boss 自己说 code 0 才算登录成功。以前这里是无条件 logged-in，
 		// 于是 UI 会显示"登录成功"，然后第一个请求就回 code 7 —— 现在如实回报。
 		if (sec.verify?.ok !== true) {
@@ -161,7 +187,7 @@ export async function loginState({ force = false } = {}) {
 	if (session === null) return { loggedIn: false, present: false };
 	if (!force && stateCache.value !== null && Date.now() - stateCache.at < STATE_TTL_MS) return { ...stateCache.value, present: true, cached: true };
 	const state = await loginStateHttp(session);
-	const value = { loggedIn: state.loggedIn, flagged: state.flagged, message: state.message };
+	const value = { loggedIn: state.loggedIn, flagged: state.flagged, message: state.message, code: state.code ?? null };
 	stateCache = { at: Date.now(), value };
 	return { ...value, present: true };
 }

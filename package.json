@@ -12,6 +12,9 @@
     "login": "node boss/login-now.mjs",
     "repair": "node boss/repair-session.mjs",
     "whoami": "node boss/probe-loginstate.mjs",
+    "diagnose": "node boss/diagnose.mjs",
+    "verify": "node boss/verify-browser.mjs",
+    "search": "node boss/browser-search.mjs",
     "scrape": "node boss/scrape.mjs"
   },
   "devDependencies": {

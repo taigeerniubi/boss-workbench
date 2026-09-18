@@ -162,6 +162,7 @@ window.__ModuleLoader__.load({
 .bw_gateQr{margin:12px auto 0;width:180px;height:180px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2);background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .bw_gateQrImg{width:100%;height:100%;object-fit:contain}
 .bw_gatePhase{margin-top:10px;font-size:12.5px;color:var(--dsw-alias-label-secondary);min-height:18px}
+.bw_gateDetail{margin-top:4px;font-size:11.5px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
 .bw_gateHot{color:var(--dsw-alias-state-warn-label,#dd8629)}
 .bw_gateBad{color:var(--dsw-alias-state-error-primary,#ec1313)}
 .bw_gateOk{color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#22c55e) 70%,#0f1115)}
@@ -837,7 +838,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 		 * 测试里那些按序号驱动的用例不会被我改坏。
 		 */
 		function LoginGate({ onLoggedIn }) {
-			const [gate, setGate] = react.useState({ open: false, qr: null, phase: "idle", error: null });
+			const [gate, setGate] = react.useState({ open: false, qr: null, phase: "idle", error: null, detail: null });
 			const [dismissed, setDismissed] = react.useState(false);
 
 			// 挂载时问一次登录态；没登录就把二维码顶上来
@@ -850,9 +851,23 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 						if (st.loggedIn === true) return;
 						const started = await fetch("/boss/login/start", { method: "POST", credentials: "same-origin" }).then((r) => r.json());
 						if (!alive) return;
-						setGate({ open: true, qr: started.qr ?? null, phase: started.phase ?? "failed", error: started.error ?? null });
+						// 宿主说"登录成功"，但这个闸门**正是因为 state 说没登录才打开的**。
+						// 两个判据打架时以 state 为准：再问一次，不一致就强制重发二维码。
+						// （以前这里直接把 phase=logged-in 画出来，于是界面上写着"登录成功"
+						//   旁边却是个空二维码位，而实际登录态是失效的 —— 用户看到的"每次点都弹码"。）
+						if (started.phase === "logged-in") {
+							const again = await fetch("/boss/login/state?force=1", { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null));
+							if (!alive) return;
+							if (again?.loggedIn !== true) {
+								const fresh = await fetch("/boss/login/start?force=1", { method: "POST", credentials: "same-origin" }).then((r) => r.json());
+								if (!alive) return;
+								setGate({ open: true, qr: fresh.qr ?? null, phase: fresh.phase ?? "failed", error: fresh.error ?? null, detail: fresh.detail ?? null });
+								return;
+							}
+						}
+						setGate({ open: true, qr: started.qr ?? null, phase: started.phase ?? "failed", error: started.error ?? null, detail: started.detail ?? null });
 					} catch (err) {
-						if (alive) setGate({ open: true, qr: null, phase: "failed", error: String(err?.message ?? err) });
+						if (alive) setGate({ open: true, qr: null, phase: "failed", error: String(err?.message ?? err), detail: null });
 					}
 				})();
 				return () => {
@@ -867,7 +882,9 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 				const id = setInterval(async () => {
 					try {
 						const s = await fetch("/boss/login/status", { credentials: "same-origin" }).then((r) => r.json());
-						setGate((cur) => ({ ...cur, phase: s.phase ?? cur.phase, error: s.error ?? null }));
+						// detail 是宿主那边的细粒度进度（"等 __zp_stoken__… 已 3s"）。
+						// 安全验证要开一次浏览器，没有它用户只能看着转圈猜是不是卡死了。
+						setGate((cur) => ({ ...cur, phase: s.phase ?? cur.phase, error: s.error ?? null, detail: s.detail ?? null }));
 						if (s.phase === "logged-in") onLoggedIn();
 					} catch { /* 下一轮再试 */ }
 				}, 2000);
@@ -895,6 +912,10 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 							: h("img", { className: "bw_gateQrImg", src: gate.qr, alt: "Boss 登录二维码" }),
 					),
 					h("div", { className: "bw_gatePhase bw_gate" + (tone === "" ? "" : tone.charAt(0).toUpperCase() + tone.slice(1)) }, spinning ? h("span", { className: "bw_spin" }) : null, text),
+					// 细粒度进度：安全验证那一步要开浏览器、要等 stoken，只转圈会让人以为卡死了
+					gate.detail !== null && gate.detail !== undefined && gate.detail !== "" && !dead
+						? h("div", { className: "bw_gateDetail" }, gate.detail)
+						: null,
 					gate.error !== null ? h("div", { className: "bw_gatePhase bw_gateBad" }, gate.error) : null,
 					h(
 						"div",
@@ -908,7 +929,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 										onClick: async () => {
 											setGate((cur) => ({ ...cur, phase: "idle", error: null }));
 											const again = await fetch("/boss/login/start?force=1", { method: "POST", credentials: "same-origin" }).then((r) => r.json()).catch(() => null);
-											setGate({ open: true, qr: again?.qr ?? null, phase: again?.phase ?? "failed", error: again?.error ?? "取二维码失败" });
+											setGate({ open: true, qr: again?.qr ?? null, phase: again?.phase ?? "failed", error: again?.error ?? "取二维码失败", detail: again?.detail ?? null });
 										},
 									},
 									"重新获取二维码",
