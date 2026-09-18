@@ -22,7 +22,7 @@
 import { join } from "node:path";
 import { DATA_DIR, RESUMES_DIR, loadProfile, loadSession, loginStateHttp, readJson, writeJson } from "../../boss/lib.mjs";
 import { fetchBalance } from "../../boss/balance.mjs";
-import { loginState, pollLogin, startLogin } from "../../boss/loginflow.mjs";
+import { loginState, logout, pollLogin, startLogin } from "../../boss/loginflow.mjs";
 import { buildGreeting, sendGreeting } from "../../boss/greet.mjs";
 import { buildIndex, readIndex, removeResume, saveUpload } from "../../boss/resumes.mjs";
 import { runScrape } from "../../boss/jobs.mjs";
@@ -159,6 +159,10 @@ async function handle(ctx, req, res) {
 	}
 	if (method === "GET" && path === "/login/status") {
 		return sendJson(res, 200, { ok: true, ...(await pollLogin()) });
+	}
+	// 退出登录：清 session.json + 清浏览器 profile 的 cookie + 复位状态机
+	if (method === "POST" && path === "/logout") {
+		return sendJson(res, 200, await logout());
 	}
 
 	// ── 账号余额（还剩多少钱）。宿主半边持有 key，浏览器只拿数字 ────────────

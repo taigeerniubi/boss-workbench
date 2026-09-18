@@ -344,6 +344,31 @@ export const loadSession = () => readJson(sessionPath(), null);
 export const saveSession = (s) => writeJson(sessionPath(), { ...s, savedAt: new Date().toISOString() });
 export const clearSession = () => writeJson(sessionPath(), null);
 
+/**
+ * 清掉持久 profile 里的**所有 cookie**（"退出登录"用）。
+ *
+ * 为什么不直接把 browser-profile 目录删掉：那里面除了 cookie，还有 Boss 认的
+ * "这个浏览器过了验证"那部分信任。整个删掉的话，下次不但要重新扫码，还得重新过一次
+ * verify 墙。清 cookie 只丢登录态，把信任留下。
+ *
+ * 返回被清掉的数量；Playwright 不在 / 打不开 profile 就返回 null ——
+ * 退出登录不该因为浏览器起不来而失败（session.json 清了就已经退出了）。
+ */
+export async function clearBrowserCookies() {
+	try {
+		const { ctx } = await openSession({ headless: true });
+		try {
+			const before = (await ctx.cookies()).length;
+			await ctx.clearCookies();
+			return before;
+		} finally {
+			await ctx.close();
+		}
+	} catch {
+		return null;
+	}
+}
+
 /** HTTP 层：Node 自己发请求，不需要浏览器。请求头照参考项目实测可用的那一套。 */
 export const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 

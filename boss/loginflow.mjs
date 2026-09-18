@@ -192,4 +192,21 @@ export async function loginState({ force = false } = {}) {
 	return { ...value, present: true };
 }
 
+/**
+ * 退出登录：清 session.json + 清浏览器 profile 的 cookie + 把状态机复位。
+ *
+ * 三件都要做，少一件都会留下"半退出"状态：
+ *   - 只清 session.json → 浏览器 profile 里 cookie 还在，下次开浏览器抓取仍带登录态；
+ *   - 只清 profile → Node 那边照样能拿 session.json 发请求；
+ *   - 不复位 flow → `/boss/login/start` 会把旧流程当"登录成功"复用（见 14.2）。
+ */
+export async function logout() {
+	const { clearBrowserCookies, clearSession } = await import("./lib.mjs");
+	clearSession();
+	const clearedCookies = await clearBrowserCookies();
+	flow = { phase: "idle", qrId: null, cookie: "", bst: "", startedAt: 0, error: null, finalizing: false, detail: null };
+	stateCache = { at: 0, value: null };
+	return { ok: true, clearedCookies, at: new Date().toISOString() };
+}
+
 export const currentFlow = () => snapshot();

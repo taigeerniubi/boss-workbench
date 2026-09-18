@@ -1071,6 +1071,59 @@ npm run verify -- --direct  # 如果梯子的出口节点被 Boss 盯上，直�
 | `smoke.mjs` / `parse.test.mjs` | ✅ 全部通过 |
 | **真抓到岗位** | ❌ 仍未 —— 等 `npm run verify` 过墙 |
 
+## 15. 退出登录
+
+用户要的。**清三样，少一样都会留下"半退出"状态**：
+
+| 清什么 | 不清会怎样 |
+|---|---|
+| `data/session.json` | Node 那边照样能拿它发请求 |
+| 浏览器 profile 的 cookie | 开浏览器抓取时仍带登录态 |
+| 宿主内存里的 `flow` / `stateCache` | `/boss/login/start` 把旧流程当"登录成功"复用（§14.2 那个 bug） |
+
+三处入口共用同一份 `logout()`：
+
+- `POST /boss/logout`（宿主路由）
+- 工作台表头那颗「退出登录」（只在 `session.present === true` 时出现）
+- `node boss/logout.mjs` —— **不依赖 GUI**，宿主半边没重启时也能用
+
+### 15.1 两个刻意的决定
+
+**① 不删 `browser-profile/` 目录，只清 cookie。** 那个目录里除了 cookie，还有 Boss 认的
+"这个浏览器过了验证"。整个删掉的话，下次不但要重新扫码，还得**重新过一次 verify 墙**
+（§14.6）—— 那道墙是要真人动手的，代价很高。清 cookie 只丢登录态，把信任留下。
+
+**② 不清 `resumes/` 和 `data/jobs.json`。** 退出登录退的是"身份"，不是"资料"。
+用户退出登录不该丢掉简历库和已经抓到的岗位。界面上也明说了这一点，避免误操作焦虑。
+
+### 15.2 UI 上的两个细节
+
+- **按钮只在有会话时出现**：没登录的时候摆一个"退出登录"是噪音。
+- **退出后闸门得自己弹回来**：`LoginGate` 的挂载 effect 加了 `reloadKey`
+  （值取 `remote.logout.at`），退出后 deps 变化 → 重新问一次登录态 → 没登录 → 弹二维码。
+  不加这个的话，界面会停在"已登录"的样子直到下次刷新。
+
+### 15.3 顺手记一个用户踩的坑
+
+用户跑 `npm run verify -- --direct` 报了一堆：
+
+```
+npm error code ENOENT
+npm error path C:\Users\20268\package.json
+```
+
+原因只是**在 `C:\Users\20268` 下跑的** —— 那个目录没有 package.json，
+所以**验证窗口根本没打开过**，"换节点也没用"其实是因为命令压根没执行。
+README 里已经加了醒目提示，并给了不依赖 cwd 的 `node <绝对路径>` 写法。
+
+### 15.4 验证状态
+
+| 项 | 状态 |
+|---|---|
+| `smoke.mjs` §15（9 条：有/无会话、忙碌态、成功文案、失败变红、reloadKey） | ✅ 全过 |
+| `boss/logout.mjs` | ✅ 语法与依赖检查通过（**没有真跑** —— 用户现在是登录态，不该被我们退掉） |
+| `POST /boss/logout` 路由 | ⚠️ 未在运行时验证（宿主半边要重启 GUI） |
+
 
 
 

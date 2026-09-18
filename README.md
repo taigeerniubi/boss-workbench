@@ -115,6 +115,25 @@ npx playwright install chromium
 
 命令行等价物：`npm run login`
 
+> ⚠️ **所有 `npm run` 都要在仓库目录里跑。** 在别处（比如 `C:\Users\<你>`）执行会报
+> `ENOENT: Could not read package.json` —— 那不是脚本坏了，是找不着仓库。
+> 不想切目录就直接 `node <仓库路径>\boss\verify-browser.mjs` 这样调。
+
+### 1.5 退出登录
+
+工作台表头有「退出登录」（登录着的时候才出现）。它会清掉**三样**：
+
+| 清什么 | 为什么不能少 |
+|---|---|
+| `~/.dsh/boss-workbench/data/session.json` | Node 发请求用的 cookie + bst |
+| 浏览器 profile 里的 cookie | 抓取 / 过验证用的登录态 |
+| 宿主内存里的登录流程状态 | 不然 `/boss/login/start` 会把旧流程当"登录成功"复用 |
+
+**不删** `browser-profile/` 目录本身 —— 那里面还有 Boss 认的"这个浏览器过了验证"，
+删了下次要重新过 verify 墙。**简历库和已抓到的岗位也不动。**
+
+命令行等价物（宿主半边没重启时也能用）：`npm run logout`
+
 ### 2. 找岗位 —— 输入框 + 回车
 
 顶栏那三个条件是**抓取条件**，不是本地筛选器：

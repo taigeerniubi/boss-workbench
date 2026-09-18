@@ -145,6 +145,10 @@ window.__ModuleLoader__.load({
 .bw_scrapeBad{color:var(--dsw-alias-state-error-primary,#ec1313);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#ec1313) 8%,transparent)}
 .bw_scrapeBad .bw_scrapeDot{background:var(--dsw-alias-state-error-primary,#ec1313)}
 .bw_demoTag{flex:none;padding:1px 6px;margin-right:4px;font-size:10.5px;color:var(--dsw-alias-label-tertiary);border:.5px dashed var(--dsw-alias-border-l3);border-radius:5px}
+/* 退出登录：低调，但要在表头找得到 */
+.bw_logout{flex:none;margin-left:8px;height:24px;padding:0 9px;font:inherit;font-size:11.5px;color:var(--dsw-alias-label-tertiary);background:transparent;border:.5px solid var(--dsw-alias-border-l3);border-radius:6px;cursor:pointer;white-space:nowrap}
+.bw_logout:hover{color:var(--dsw-alias-state-error-primary,#ec1313);border-color:var(--dsw-alias-state-error-primary,#ec1313)}
+.bw_logout:disabled{opacity:.6;cursor:progress}
 .bw_emptyActs{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
 
 /* 卡片上的地点行：城市·商圈 + 距你多远 */
@@ -837,11 +841,12 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 		 * 独立成组件（而不是塞进 WorkbenchPage），这样 WorkbenchPage 的 hook 序号不变，
 		 * 测试里那些按序号驱动的用例不会被我改坏。
 		 */
-		function LoginGate({ onLoggedIn }) {
+		function LoginGate({ onLoggedIn, reloadKey }) {
 			const [gate, setGate] = react.useState({ open: false, qr: null, phase: "idle", error: null, detail: null });
 			const [dismissed, setDismissed] = react.useState(false);
 
-			// 挂载时问一次登录态；没登录就把二维码顶上来
+			// 挂载时问一次登录态；没登录就把二维码顶上来。
+			// reloadKey 变化（= 刚点了退出登录）也会重跑一遍，所以"退出"之后闸门会自己弹回来。
 			react.useEffect(() => {
 				let alive = true;
 				(async () => {
@@ -873,7 +878,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 				return () => {
 					alive = false;
 				};
-			}, []);
+			}, [reloadKey]);
 
 			// 开着的时候每 2 秒推进一步
 			react.useEffect(() => {
@@ -1370,6 +1375,26 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 				}));
 			};
 
+			// ── 退出登录 ────────────────────────────────────────────────────
+			// 刻意**不加 useState**：状态挂进已有的 remote 里，WorkbenchPage 的 hook
+			// 序号（0-10 归本组件，11 起归子组件）就不能再动了。
+			const logout = remote?.logout ?? null;
+			const loggingOut = logout?.running === true;
+			const doLogout = async () => {
+				if (loggingOut) return;
+				// eslint-disable-next-line no-alert
+				if (typeof confirm === "function" && !confirm("退出登录？\n\n会清掉本机保存的 Boss 凭证和浏览器 cookie，下次要重新扫码。\n简历库和已抓到的岗位不动。")) return;
+				setRemote((cur) => ({ ...(cur ?? {}), logout: { running: true } }));
+				const j = await postJson("/boss/logout");
+				setRemote((cur) => ({
+					...(cur ?? {}),
+					logout: { running: false, at: Date.now(), ok: j?.ok === true, clearedCookies: j?.clearedCookies ?? null, error: j?.ok === true ? null : "宿主 /boss/logout 没响应（重启一次 GUI？）" },
+					// 立刻把"已登录"的痕迹抹掉，否则表头还在说登录着
+					session: { present: false },
+					scrape: null,
+				}));
+			};
+
 			/** 状态迁移：改状态 + 补一条时间线。sending / preparing 由假定时器推到下一步。 */
 			const setStatus = (id, status, text, flag) =>
 				setApps((cur) => cur.map((a) => (a.id === id ? { ...a, status, timeline: [...a.timeline, [stamp(), text, flag ?? 0]] } : a)));
@@ -1472,6 +1497,20 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					),
 					h("span", { className: "bw_spacer" }),
 					h(WorkbenchBalance, null),
+					// 只有真的存着会话时才给"退出" —— 没登录的时候摆一个退出按钮没有意义
+					remote?.session?.present === true
+						? h(
+								"button",
+								{
+									type: "button",
+									className: "bw_logout",
+									disabled: loggingOut,
+									title: "清掉本机保存的 Boss 凭证与浏览器 cookie",
+									onClick: () => doLogout(),
+								},
+								loggingOut ? "退出中…" : "退出登录",
+							)
+						: null,
 					h(
 						"div",
 						{ className: "bw_tallies" },
@@ -1548,6 +1587,21 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					),
 					h("span", { className: "bw_count" }, "筛出 " + String(shownCount) + " / 共 " + String(apps.length) + " 个岗位"),
 				),
+				// 退出登录的结果条（成功/失败各说各的，别让按钮点下去没交代）
+				logout !== null && logout.running !== true && logout.at !== undefined
+					? h(
+							"div",
+							{ className: "bw_scrape" + (logout.ok === true ? " bw_scrapeOk" : " bw_scrapeBad") },
+							h("span", { className: "bw_scrapeDot" }),
+							h(
+								"span",
+								null,
+								logout.ok === true
+									? "已退出登录" + (logout.clearedCookies === null ? "（凭证已清；浏览器 cookie 没清掉，Playwright 不可用）" : `（凭证与 ${logout.clearedCookies} 个浏览器 cookie 已清）`) + " · 简历库和岗位列表没动"
+									: String(logout.error ?? "退出失败"),
+							),
+						)
+					: null,
 				// 抓取进度与结果。这里也是"为什么没抓到"的唯一出口 ——
 				// 风控 code 35、登录失效、环境异常 code 37 都会原样显示在这儿。
 				scrape === null
@@ -1616,7 +1670,7 @@ button[aria-label="${PANEL_LABEL}"]:not(:has(> span + span)){box-sizing:border-b
 					),
 				),
 				// 登录闸门放最后：它的 hook 排在简历库之后，前面那些按序号驱动的用例不受影响
-				h(LoginGate, { onLoggedIn: loadState }),
+				h(LoginGate, { onLoggedIn: loadState, reloadKey: remote?.logout?.at ?? 0 }),
 			);
 		}
 		//#endregion

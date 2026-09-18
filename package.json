@@ -10,6 +10,7 @@
     "test:bridge": "node boss/bridge.test.mjs",
     "test:connectivity": "node boss/connectivity.test.mjs",
     "login": "node boss/login-now.mjs",
+    "logout": "node boss/logout.mjs",
     "repair": "node boss/repair-session.mjs",
     "whoami": "node boss/probe-loginstate.mjs",
     "diagnose": "node boss/diagnose.mjs",

@@ -492,5 +492,23 @@ const busy = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, scrape: {
 check(busy.join("\n").includes("正在 Boss 搜「Java」"), "抓取中显示正在搜什么");
 check(/button\.bw_btn bw_btnGo bw_btnBusy(\s|$)/.test(busy.join("\n")), "抓取中按钮变忙碌态（不让重复点）");
 
+console.log("\n── 15. 退出登录 ──");
+// 有会话时才给退出入口
+const canLogout = render(mainEntry.component, {}, { 0: "BJ1", 7: REAL });
+check(/button\.bw_logout(\s|$)/.test(canLogout.join("\n")), "登录着的时候表头有「退出登录」");
+const noSession = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, session: { present: false } } });
+check(!/button\.bw_logout(\s|$)/.test(noSession.join("\n")), "没会话时不摆一个没用的退出按钮");
+const loggingOut = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, logout: { running: true } } });
+check(loggingOut.join("\n").includes("退出中…"), "点下去立刻变「退出中…」（不让重复点）");
+check(/button\.bw_logout(\s|$)/.test(loggingOut.join("\n")) && /disabled/.test(JSON.stringify(loggingOut)) === false, "忙碌态走的是 disabled 属性，不是换按钮");
+const loggedOut = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, session: { present: false }, logout: { running: false, at: 1, ok: true, clearedCookies: 12 } } });
+check(loggedOut.join("\n").includes("已退出登录") && loggedOut.join("\n").includes("12 个浏览器 cookie"), "退出成功后说清楚清了什么，不静默");
+check(loggedOut.join("\n").includes("简历库和岗位列表没动"), "说清楚退出不影响简历库与已抓岗位");
+const logoutFail = render(mainEntry.component, {}, { 0: "BJ1", 7: { ...REAL, logout: { running: false, at: 1, ok: false, error: "宿主 /boss/logout 没响应（重启一次 GUI？）" } } });
+check(/div\.bw_scrape bw_scrapeBad(\s|$)/.test(logoutFail.join("\n")), "退出失败时变红并给原因");
+check(logoutFail.join("\n").includes("重启一次 GUI"), "失败原因里点名宿主半边要重启");
+// 闸门必须能在"刚退出"之后重新弹回来
+check(/reloadKey/.test(readFileSync(new URL("./plugin/lib/client.js", import.meta.url), "utf8")), "闸门接了 reloadKey（退出后能自己弹回来）");
+
 console.log("\n" + (fail.length === 0 ? "全部通过 ✅" : `${fail.length} 项失败 ❌`));
 process.exit(fail.length === 0 ? 0 : 1);
